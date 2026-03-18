@@ -58,3 +58,5 @@ mini-swe-agent/
 # Nix
 .direnv/
 result
+
+Shadow Zone.md

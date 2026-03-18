@@ -1,0 +1,30 @@
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y \
+    curl git bash nodejs npm ripgrep ffmpeg tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv installs Python 3.11 itself — no apt python needed
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+ENV PATH="/root/.cargo/bin:/root/.local/bin:$PATH"
+
+RUN git clone --recurse-submodules https://github.com/NousResearch/hermes-agent.git /app
+WORKDIR /app
+
+RUN uv venv venv --python 3.11 \
+    && export VIRTUAL_ENV=/app/venv \
+    && uv pip install -e ".[all]" \
+    && uv pip install -e "./mini-swe-agent" \
+    && uv pip install -e "./tinker-atropos"
+
+RUN mkdir -p /root/.local/bin \
+    && ln -sf /app/venv/bin/hermes /root/.local/bin/hermes
+
+RUN mkdir -p /root/.hermes/{cron,sessions,logs,memories,skills,pairing,hooks,image_cache,audio_cache,whatsapp/session} \
+    && cp /app/cli-config.yaml.example /root/.hermes/config.yaml
+
+VOLUME ["/root/.hermes"]
+EXPOSE 6666
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["hermes"]

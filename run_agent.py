@@ -4528,7 +4528,10 @@ class AIAgent:
             self.provider = fb_provider
             self.base_url = fb_base_url
             self.api_mode = fb_api_mode
-            self._fallback_activated = True
+            self._fallback_index += 1
+            # Mark exhausted only when we've consumed the last chain entry
+            if self._fallback_index >= len(self._fallback_chain):
+                self._fallback_activated = True
 
             if fb_api_mode == "anthropic_messages":
                 # Build native Anthropic client instead of using OpenAI client
@@ -4576,13 +4579,14 @@ class AIAgent:
                     fb_context_length * self.context_compressor.threshold_percent
                 )
 
+            chain_pos = f" (#{self._fallback_index}/{len(self._fallback_chain)})" if len(self._fallback_chain) > 1 else ""
             self._emit_status(
-                f"🔄 Primary model failed — switching to fallback: "
+                f"🔄 Model failed — switching to fallback{chain_pos}: "
                 f"{fb_model} via {fb_provider}"
             )
             logging.info(
-                "Fallback activated: %s → %s (%s)",
-                old_model, fb_model, fb_provider,
+                "Fallback activated%s: %s → %s (%s)",
+                chain_pos, old_model, fb_model, fb_provider,
             )
             return True
         except Exception as e:
