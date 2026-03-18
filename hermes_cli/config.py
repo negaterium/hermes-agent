@@ -2759,7 +2759,12 @@ def save_config(config: Dict[str, Any]):
     if not sec or sec.get("redact_secrets") is None:
         parts.append(_SECURITY_COMMENT)
     fb = normalized.get("fallback_model", {})
-    if not fb or not (fb.get("provider") and fb.get("model")):
+    # fallback_model can be a dict (single) or list (chain) — handle both
+    if isinstance(fb, list):
+        fb_configured = any(f.get("provider") and f.get("model") for f in fb if isinstance(f, dict))
+    else:
+        fb_configured = bool(fb and fb.get("provider") and fb.get("model"))
+    if not fb_configured:
         parts.append(_FALLBACK_COMMENT)
 
     atomic_yaml_write(
