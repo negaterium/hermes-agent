@@ -2,6 +2,7 @@ FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
     curl git bash nodejs npm ripgrep ffmpeg tini \
+    libvulkan-dev glslang-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # uv installs Python 3.11 itself — no apt python needed
