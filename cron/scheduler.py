@@ -387,6 +387,19 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # Max iterations
         max_iterations = _cfg.get("agent", {}).get("max_turns") or _cfg.get("max_turns") or 90
 
+        # Fallback model chain — read from config.yaml unless job overrides with its own model
+        # (jobs with explicit model/provider/base_url don't need a cloud fallback)
+        fallback_chain = None
+        if not job.get("model"):
+            _fb = _cfg.get("fallback_model")
+            if isinstance(_fb, list):
+                fallback_chain = [
+                    fb for fb in _fb
+                    if isinstance(fb, dict) and fb.get("provider") and fb.get("model")
+                ]
+            elif isinstance(_fb, dict) and _fb.get("provider") and _fb.get("model"):
+                fallback_chain = [_fb]
+
         # Provider routing
         pr = _cfg.get("provider_routing", {})
         smart_routing = _cfg.get("smart_model_routing", {}) or {}
@@ -437,6 +450,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             providers_order=pr.get("order"),
             provider_sort=pr.get("sort"),
             disabled_toolsets=["cronjob", "messaging", "clarify"],
+            fallback_model=fallback_chain,
             quiet_mode=True,
             skip_memory=True,  # Cron system prompts would corrupt user representations
             platform="cron",
