@@ -4506,7 +4506,9 @@ class AIAgent:
         try:
             from agent.auxiliary_client import resolve_provider_client
             fb_client, _ = resolve_provider_client(
-                fb_provider, model=fb_model, raw_codex=True)
+                fb_provider, model=fb_model, raw_codex=True,
+                explicit_base_url=fb.get("base_url"),
+                explicit_api_key=fb.get("api_key"))
             if fb_client is None:
                 logging.warning(
                     "Fallback to %s failed: provider not configured",
