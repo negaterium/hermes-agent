@@ -658,8 +658,10 @@ def build_skills_system_prompt(
 
         result = (
             "## Skills (mandatory)\n"
-            "Before replying, scan the skills below. If one clearly matches your task, "
-            "load it with skill_view(name) and follow its instructions. "
+            "Before replying, scan the skills below. Load a skill with skill_view(name) only if ALL of these are true:\n"
+            "  1. The skill clearly matches the task (not just the topic).\n"
+            "  2. It likely contains invocation details you don't already have — auth flows, API specifics, command sequences, non-obvious pitfalls.\n"
+            "  3. The task is non-trivial: a single known command, a file read, or something already covered by memory does NOT warrant loading a skill.\n"
             "If a skill has issues, fix it with skill_manage(action='patch').\n"
             "After difficult/iterative tasks, offer to save as a skill. "
             "If a skill you loaded was missing steps, had wrong commands, or needed "
@@ -669,7 +671,7 @@ def build_skills_system_prompt(
             + "\n".join(index_lines) + "\n"
             "</available_skills>\n"
             "\n"
-            "If none match, proceed normally without loading a skill."
+            "If none match, or you already have what you need, proceed without loading a skill."
         )
 
     # ── Store in LRU cache ────────────────────────────────────────────
