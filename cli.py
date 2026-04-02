@@ -3665,8 +3665,8 @@ class HermesCLI:
             self._explicit_base_url = None
 
         if target_api_key:
-            self.api_key=***
-            self._explicit_api_key=***
+            self.api_key = target_api_key
+            self._explicit_api_key = target_api_key
         else:
             # Clear stale custom api_key; provider routing will supply the real one
             self.api_key = None
