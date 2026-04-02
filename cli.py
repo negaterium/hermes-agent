@@ -4575,6 +4575,8 @@ class HermesCLI:
             save_config_value("model.default", result.new_model)
             if result.provider_changed:
                 save_config_value("model.provider", result.target_provider)
+            save_config_value("model.base_url", result.base_url or None)
+            save_config_value("model.api_key", result.api_key or None)
             _cprint("    Saved to config.yaml (--global)")
         else:
             _cprint("    (session only — add --global to persist)")
@@ -4807,6 +4809,8 @@ class HermesCLI:
             save_config_value("model.default", result.new_model)
             if result.provider_changed:
                 save_config_value("model.provider", result.target_provider)
+            save_config_value("model.base_url", result.base_url or None)
+            save_config_value("model.api_key", result.api_key or None)
             _cprint("    Saved to config.yaml (--global)")
         else:
             _cprint("    (session only — add --global to persist)")
@@ -4896,8 +4900,98 @@ class HermesCLI:
 
         print("  To change model or provider, use: hermes model")
 
+    def _handle_model_command(self, cmd: str):
+        """Handle the /model command to show or switch the active model."""
+        parts = cmd.strip().split(maxsplit=1)
+        args = parts[1].strip() if len(parts) > 1 else ""
 
-    
+        if not args:
+            from hermes_cli.models import normalize_provider, _PROVIDER_LABELS
+
+            current_provider = normalize_provider(self.provider) or "auto"
+            provider_label = _PROVIDER_LABELS.get(current_provider, current_provider)
+            print(f"\n  model    : {self.model}")
+            print(f"  provider : {provider_label} ({current_provider})")
+            print()
+            print("  Usage: /model <query>          fuzzy match (e.g. sonnet, glm-flash, gemini)")
+            print("         /model <provider>:<model>  explicit provider+model")
+            print("         /m is an alias for /model")
+            return
+
+        from hermes_cli.models import normalize_provider, parse_model_input
+        from hermes_cli.model_switch import switch_model
+
+        current_provider = normalize_provider(self.provider) or "openrouter"
+        parsed_provider, parsed_model = parse_model_input(args, current_provider)
+        explicit_provider = parsed_provider if parsed_model != args else ""
+        raw_input = parsed_model if parsed_model != args else args
+
+        result = switch_model(
+            raw_input=raw_input,
+            current_provider=current_provider,
+            current_model=self.model or "",
+            current_base_url=self.base_url or "",
+            current_api_key=self.api_key or "",
+            is_global=False,
+            explicit_provider=explicit_provider,
+            user_providers=None,
+            custom_providers=None,
+        )
+        self._apply_model_switch_result(result, persist_global=False)
+
+    def _handle_prompt_command(self, cmd: str):
+        """Handle the /prompt command to view or set system prompt."""
+        parts = cmd.split(maxsplit=1)
+
+        if len(parts) > 1:
+            # Set new prompt
+            new_prompt = parts[1].strip()
+
+            if new_prompt.lower() == "clear":
+                self.system_prompt = ""
+                self.agent = None  # Force re-init
+                if save_config_value("agent.system_prompt", ""):
+                    print("(^_^)b System prompt cleared (saved to config)")
+                else:
+                    print("(^_^) System prompt cleared (session only)")
+            else:
+                self.system_prompt = new_prompt
+                self.agent = None  # Force re-init
+                if save_config_value("agent.system_prompt", new_prompt):
+                    print("(^_^)b System prompt set (saved to config)")
+                else:
+                    print("(^_^) System prompt set (session only)")
+                print(f"  \"{new_prompt[:60]}{'...' if len(new_prompt) > 60 else ''}\"")
+        else:
+            # Show current prompt
+            print()
+            print("+" + "-" * 50 + "+")
+            print("|" + " " * 15 + "(^_^) System Prompt" + " " * 15 + "|")
+            print("+" + "-" * 50 + "+")
+            print()
+            if self.system_prompt:
+                # Word wrap the prompt for display
+                words = self.system_prompt.split()
+                lines = []
+                current_line = ""
+                for word in words:
+                    if len(current_line) + len(word) + 1 <= 50:
+                        current_line += (" " if current_line else "") + word
+                    else:
+                        lines.append(current_line)
+                        current_line = word
+                if current_line:
+                    lines.append(current_line)
+                for line in lines:
+                    print(f"  {line}")
+            else:
+                print("  (no custom prompt set - using default)")
+            print()
+            print("  Usage:")
+            print("    /prompt <text>  - Set a custom system prompt")
+            print("    /prompt clear   - Remove custom prompt")
+            print("    /personality    - Use a predefined personality")
+            print()
 
     @staticmethod
     def _resolve_personality_prompt(value) -> str:
@@ -5417,10 +5511,12 @@ class HermesCLI:
         elif canonical == "resume":
             self._handle_resume_command(cmd_original)
         elif canonical == "model":
-            self._handle_model_switch(cmd_original)
+            self._handle_model_command(cmd_original)
         elif canonical == "provider":
             self._show_model_and_providers()
-
+        elif canonical == "prompt":
+            # Use original case so prompt text isn't lowercased
+            self._handle_prompt_command(cmd_original)
         elif canonical == "personality":
             # Use original case (handler lowercases the personality name itself)
             self._handle_personality_command(cmd_original)
