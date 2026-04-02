@@ -3449,6 +3449,257 @@ class HermesCLI:
 
         print("  To change model or provider, use: hermes model")
 
+    def _handle_model_command(self, cmd: str):
+        """Handle /model — show or switch the active model.
+
+        Usage:
+          /model                          show current model + provider
+          /model <query>                  switch model, fuzzy-match then auto-detect provider
+          /model <provider>:<model-name>  switch model + provider explicitly
+
+        Query matching order:
+          1. Exact match against any provider catalog or OpenRouter list
+          2. Substring match (query contained in model id)
+          3. difflib close-match for typos
+          4. Pass through as-is (for custom/local endpoints not in any catalog)
+        """
+        from hermes_cli.models import (
+            parse_model_input,
+            detect_provider_for_model,
+            normalize_provider,
+            _PROVIDER_LABELS,
+            _PROVIDER_MODELS,
+            OPENROUTER_MODELS,
+        )
+
+        def _fuzzy_resolve(query: str, current_provider: str):
+            """Return (provider, model_id, base_url, api_key, matched_via) or None.
+
+            Resolution order:
+              0. fallback_model entries in config.yaml — these are user-defined named
+                 endpoints (e.g. glm-flash = local llama.cpp, qwen3.5:9b = Ollama).
+                 Matched by exact or substring on the model field.
+              1. Static provider catalogs — exact match (case-insensitive)
+              2. Substring match across all catalogs
+              3. difflib close-match for typos
+              4. Returns None → caller passes the query through as-is
+            """
+            q = query.strip().lower()
+            if not q:
+                return None
+
+            # --- Step 0: user's config.yaml named models ---
+            # Check model.default (the primary model) and fallback_model list.
+            # These are authoritative — user-defined names beat the generic catalog.
+            try:
+                import yaml as _yaml
+                from pathlib import Path as _Path
+                _cfg_path = _Path.home() / ".hermes" / "config.yaml"
+                if _cfg_path.exists():
+                    with open(_cfg_path, encoding="utf-8") as _f:
+                        _cfg = _yaml.safe_load(_f) or {}
+
+                    # 0a. model.default + model.provider — the primary configured model
+                    _model_cfg = _cfg.get("model", {})
+                    if isinstance(_model_cfg, dict):
+                        _primary = (_model_cfg.get("default") or "").strip()
+                        _primary_provider = (_model_cfg.get("provider") or current_provider).strip()
+                        _primary_base_url = (_model_cfg.get("base_url") or "").strip()
+                        _primary_api_key = (_model_cfg.get("api_key") or "").strip()
+                    else:
+                        _primary = str(_model_cfg).strip()
+                        _primary_provider = current_provider
+                        _primary_base_url = ""
+                        _primary_api_key = ""
+                    if _primary and (q == _primary.lower() or q in _primary.lower()):
+                        return (
+                            _primary_provider, _primary,
+                            _primary_base_url, _primary_api_key,
+                            "model.default",
+                        )
+
+                    # 0b. fallback_model list — named local/custom endpoints
+                    for entry in (_cfg.get("fallback_model") or []):
+                        m = (entry.get("model") or "").strip()
+                        if not m:
+                            continue
+                        if q == m.lower() or q in m.lower():
+                            return (
+                                entry.get("provider", current_provider),
+                                m,
+                                entry.get("base_url", "") or "",
+                                entry.get("api_key", "") or "",
+                                "fallback_model entry",
+                            )
+            except Exception:
+                pass
+
+            # --- build a scored candidate list for catalog matching ---
+            # Each entry: (model_id, provider_id, priority)
+            # priority 0 = authenticated provider, 1 = unauthenticated, 2 = openrouter
+            candidates: list[tuple[str, str, int]] = []
+
+            authed: set[str] = set()
+            try:
+                from hermes_cli.auth import PROVIDER_REGISTRY
+                import os as _os
+                for pid, pconfig in PROVIDER_REGISTRY.items():
+                    for env_var in getattr(pconfig, "api_key_env_vars", []):
+                        if _os.getenv(env_var, "").strip():
+                            authed.add(pid)
+                            break
+            except Exception:
+                pass
+
+            _AGGREGATORS = {"nous", "openrouter"}
+            for pid, models in _PROVIDER_MODELS.items():
+                if pid in _AGGREGATORS:
+                    continue
+                prio = 0 if pid in authed else 1
+                for m in models:
+                    candidates.append((m, pid, prio))
+
+            for mid, _ in OPENROUTER_MODELS:
+                candidates.append((mid, "openrouter", 2))
+
+            candidates.sort(key=lambda x: x[2])
+
+            _no_endpoint = ("", "")  # placeholder base_url/api_key for catalog entries
+
+            # --- Step 1: exact match ---
+            for mid, pid, _ in candidates:
+                if q == mid.lower():
+                    return (pid, mid) + _no_endpoint + ("exact",)
+                if "/" in mid and q == mid.split("/", 1)[1].lower():
+                    return (pid, mid) + _no_endpoint + ("exact",)
+
+            # --- Step 2: substring match, longer id wins on ties ---
+            substr_hits = [(mid, pid, prio) for mid, pid, prio in candidates
+                           if q in mid.lower()]
+            if substr_hits:
+                substr_hits.sort(key=lambda x: (x[2], -len(x[0])))
+                mid, pid, _ = substr_hits[0]
+                return (pid, mid) + _no_endpoint + (f"substring ({len(substr_hits)} candidates)",)
+
+            # --- Step 3: difflib close match ---
+            from difflib import get_close_matches
+            all_ids = [mid.lower() for mid, _, _ in candidates]
+            close = get_close_matches(q, all_ids, n=1, cutoff=0.6)
+            if close:
+                for mid, pid, _ in candidates:
+                    if mid.lower() == close[0]:
+                        return (pid, mid) + _no_endpoint + ("close match",)
+
+            return None
+
+        parts = cmd.strip().split(maxsplit=1)
+        args = parts[1].strip() if len(parts) > 1 else ""
+
+        # --- show current ---
+        if not args:
+            current_provider = normalize_provider(self.provider) or "auto"
+            provider_label = _PROVIDER_LABELS.get(current_provider, current_provider)
+            print(f"\n  model    : {self.model}")
+            print(f"  provider : {provider_label} ({current_provider})")
+            print()
+            print("  Usage: /model <query>          fuzzy match (e.g. sonnet, glm-flash, gemini)")
+            print("         /model <provider>:<model>  explicit provider+model")
+            print("         /m is an alias for /model")
+            return
+
+        # --- switch ---
+        current_provider = normalize_provider(self.provider) or "openrouter"
+
+        # If it looks like an explicit provider:model, parse it directly
+        try:
+            parsed_provider, parsed_model = parse_model_input(args, current_provider)
+        except Exception as exc:
+            print(f"  Error parsing model input: {exc}")
+            return
+
+        explicit_provider_switch = (parsed_provider != current_provider)
+
+        target_base_url = ""
+        target_api_key = ""
+
+        if explicit_provider_switch:
+            # User gave provider:model explicitly — trust it, skip fuzzy
+            target_provider = parsed_provider
+            new_model = parsed_model
+            matched_via = "explicit"
+        else:
+            # No explicit provider prefix — run fuzzy resolution first
+            fuzzy = _fuzzy_resolve(args, current_provider)
+            if fuzzy:
+                target_provider, new_model, target_base_url, target_api_key, matched_via = fuzzy
+                # For catalog matches (no custom endpoint), still try detect for
+                # potential OpenRouter remapping
+                if not target_base_url and target_provider == current_provider:
+                    try:
+                        detected = detect_provider_for_model(new_model, current_provider)
+                        if detected:
+                            target_provider, new_model = detected
+                    except Exception:
+                        pass
+            else:
+                # Not in any catalog — pass through as-is, let the API decide
+                target_provider = current_provider
+                new_model = parsed_model
+                matched_via = "pass-through (not in catalog)"
+
+        if not new_model:
+            print("  No model specified.")
+            return
+
+        # Apply to the running session
+        self.model = new_model
+        self.provider = target_provider
+        self.requested_provider = target_provider
+
+        if target_base_url:
+            self.base_url = target_base_url
+            self._explicit_base_url = target_base_url
+        else:
+            # Switching to a catalog model — clear any stale custom endpoint
+            self.base_url = None
+            self._explicit_base_url = None
+
+        if target_api_key:
+            self.api_key=***
+            self._explicit_api_key=***
+        else:
+            # Clear stale custom api_key; provider routing will supply the real one
+            self.api_key = None
+            self._explicit_api_key = None
+
+        # Null the cached agent so it's rebuilt with the new model on the next turn
+        self.agent = None
+        self._active_agent_route_signature = None
+
+        # Persist to config.yaml
+        try:
+            save_config_value("model.default", new_model)
+            save_config_value("model.provider", target_provider)
+            if target_base_url:
+                save_config_value("model.base_url", target_base_url)
+            else:
+                # Clear persisted custom endpoint so it doesn't bleed into the next session
+                save_config_value("model.base_url", None)
+            if target_api_key:
+                save_config_value("model.api_key", target_api_key)
+            else:
+                save_config_value("model.api_key", None)
+        except Exception as exc:
+            print(f"  Warning: could not persist to config.yaml: {exc}")
+
+        provider_label = _PROVIDER_LABELS.get(target_provider, target_provider)
+        print(f"\n  Switched to : {new_model}")
+        print(f"  Provider    : {provider_label} ({target_provider})")
+        if target_base_url:
+            print(f"  Endpoint    : {target_base_url}")
+        print(f"  Matched via : {matched_via}")
+        print()
+
     def _handle_prompt_command(self, cmd: str):
         """Handle the /prompt command to view or set system prompt."""
         parts = cmd.split(maxsplit=1)
@@ -4000,6 +4251,8 @@ class HermesCLI:
             self._handle_resume_command(cmd_original)
         elif canonical == "provider":
             self._show_model_and_providers()
+        elif canonical == "model":
+            self._handle_model_command(cmd_original)
         elif canonical == "prompt":
             # Use original case so prompt text isn't lowercased
             self._handle_prompt_command(cmd_original)
