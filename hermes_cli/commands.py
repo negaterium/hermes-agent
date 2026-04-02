@@ -99,10 +99,13 @@ COMMAND_REGISTRY: list[CommandDef] = [
     # Configuration
     CommandDef("config", "Show current configuration", "Configuration",
                cli_only=True),
-    CommandDef("model", "Switch model for this session", "Configuration", args_hint="[model] [--global]"),
+    CommandDef("model", "Show or switch the active model. Usage: /model [provider:model|model]",
+               "Configuration", aliases=("m",), args_hint="[provider:model|model]",
+               cli_only=True),
     CommandDef("provider", "Show available providers and current provider",
                "Configuration"),
-
+    CommandDef("prompt", "View/set custom system prompt", "Configuration",
+               cli_only=True, args_hint="[text]", subcommands=("clear",)),
     CommandDef("personality", "Set a predefined personality", "Configuration",
                args_hint="[name]"),
     CommandDef("statusbar", "Toggle the context/model status bar", "Configuration",

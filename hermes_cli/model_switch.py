@@ -404,6 +404,123 @@ def _resolve_alias_fallback(
     return None
 
 
+def resolve_model_query(
+    raw_input: str,
+    current_provider: str,
+) -> Optional[tuple[str, str, str, str, str]]:
+    """Resolve a /model query using config-backed targets and catalog fuzzy matches.
+
+    Returns ``(provider, model, base_url, api_key, matched_via)`` or ``None``.
+    The resolution order intentionally preserves the darkserver-specific behavior:
+
+    1. Config-backed targets in config.yaml (model.default + fallback_providers/
+       fallback_model) are trusted first.
+    2. Exact model-id match across provider catalogs.
+    3. Substring match across provider catalogs.
+    4. difflib close-match for typos.
+    5. ``None`` -> caller may fall through to pass-through / validation logic.
+    """
+    q = raw_input.strip().lower()
+    if not q:
+        return None
+
+    # ------------------------------------------------------------------
+    # 1) Config-backed targets from config.yaml
+    # ------------------------------------------------------------------
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config() or {}
+        if isinstance(cfg, dict):
+            model_cfg = cfg.get("model", {})
+            if isinstance(model_cfg, dict):
+                primary = (model_cfg.get("default") or "").strip()
+                if primary and (q == primary.lower() or q in primary.lower()):
+                    return (
+                        (model_cfg.get("provider") or current_provider).strip() or current_provider,
+                        primary,
+                        (model_cfg.get("base_url") or "").strip(),
+                        (model_cfg.get("api_key") or "").strip(),
+                        "model.default",
+                    )
+
+            fallback_entries = cfg.get("fallback_providers") or cfg.get("fallback_model") or []
+            if isinstance(fallback_entries, dict):
+                fallback_entries = [fallback_entries]
+            for entry in fallback_entries:
+                if not isinstance(entry, dict):
+                    continue
+                model = (entry.get("model") or "").strip()
+                if not model:
+                    continue
+                if q == model.lower() or q in model.lower():
+                    return (
+                        (entry.get("provider") or current_provider).strip() or current_provider,
+                        model,
+                        entry.get("base_url", "") or "",
+                        entry.get("api_key", "") or "",
+                        "fallback_providers" if cfg.get("fallback_providers") else "fallback_model entry",
+                    )
+    except Exception:
+        pass
+
+    # ------------------------------------------------------------------
+    # 2) Static provider catalogs with fuzzy matching
+    # ------------------------------------------------------------------
+    try:
+        from hermes_cli.models import _PROVIDER_MODELS, OPENROUTER_MODELS
+        from hermes_cli.auth import PROVIDER_REGISTRY
+        import os as _os
+    except Exception:
+        return None
+
+    authed: set[str] = set()
+    try:
+        for pid, pconfig in PROVIDER_REGISTRY.items():
+            for env_var in getattr(pconfig, "api_key_env_vars", []):
+                if _os.getenv(env_var, "").strip():
+                    authed.add(pid)
+                    break
+    except Exception:
+        pass
+
+    _AGGREGATORS = {"nous", "openrouter"}
+    candidates: list[tuple[str, str, int]] = []
+    for pid, models in _PROVIDER_MODELS.items():
+        if pid in _AGGREGATORS:
+            continue
+        prio = 0 if pid in authed else 1
+        for m in models:
+            candidates.append((m, pid, prio))
+    for mid, _ in OPENROUTER_MODELS:
+        candidates.append((mid, "openrouter", 2))
+
+    candidates.sort(key=lambda x: x[2])
+    no_endpoint = ("", "")
+
+    for mid, pid, _prio in candidates:
+        mid_lower = mid.lower()
+        if q == mid_lower:
+            return (pid, mid) + no_endpoint + ("exact",)
+        if "/" in mid and q == mid.split("/", 1)[1].lower():
+            return (pid, mid) + no_endpoint + ("exact",)
+
+    substr_hits = [(mid, pid, prio) for mid, pid, prio in candidates if q in mid.lower()]
+    if substr_hits:
+        substr_hits.sort(key=lambda x: (x[2], -len(x[0])))
+        mid, pid, _prio = substr_hits[0]
+        return (pid, mid) + no_endpoint + (f"substring ({len(substr_hits)} candidates)",)
+
+    from difflib import get_close_matches
+    all_ids = [mid.lower() for mid, _pid, _prio in candidates]
+    close = get_close_matches(q, all_ids, n=1, cutoff=0.6)
+    if close:
+        for mid, pid, _prio in candidates:
+            if mid.lower() == close[0]:
+                return (pid, mid) + no_endpoint + ("close match",)
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Core model-switching pipeline
 # ---------------------------------------------------------------------------
@@ -465,6 +582,9 @@ def switch_model(
     from hermes_cli.runtime_provider import resolve_runtime_provider
 
     resolved_alias = ""
+    model_query_via = ""
+    override_base_url = ""
+    override_api_key = ""
     new_model = raw_input.strip()
     target_provider = current_provider
 
@@ -541,90 +661,103 @@ def switch_model(
     # PATH B: No explicit provider — resolve from model input
     # =================================================================
     else:
-        # --- Step a: Try alias resolution on current provider ---
-        alias_result = resolve_alias(raw_input, current_provider)
-
-        if alias_result is not None:
-            target_provider, new_model, resolved_alias = alias_result
-            logger.debug(
-                "Alias '%s' resolved to %s on %s",
-                resolved_alias, new_model, target_provider,
-            )
+        fuzzy_result = resolve_model_query(raw_input, current_provider)
+        if fuzzy_result is not None:
+            target_provider, new_model, override_base_url, override_api_key, model_query_via = fuzzy_result
+            # If the query resolved to a catalog model without a custom endpoint,
+            # still try provider detection so bare model IDs can hop providers.
+            if not override_base_url and target_provider == current_provider:
+                try:
+                    detected = detect_provider_for_model(new_model, current_provider)
+                    if detected:
+                        target_provider, new_model = detected
+                except Exception:
+                    pass
         else:
-            # --- Step b: Alias exists but not on current provider -> fallback ---
-            key = raw_input.strip().lower()
-            if key in MODEL_ALIASES:
-                authed = get_authenticated_provider_slugs(
-                    current_provider=current_provider,
-                    user_providers=user_providers,
-                    custom_providers=custom_providers,
+            # --- Step a: Try alias resolution on current provider ---
+            alias_result = resolve_alias(raw_input, current_provider)
+
+            if alias_result is not None:
+                target_provider, new_model, resolved_alias = alias_result
+                logger.debug(
+                    "Alias '%s' resolved to %s on %s",
+                    resolved_alias, new_model, target_provider,
                 )
-                fallback_result = _resolve_alias_fallback(raw_input, authed)
-                if fallback_result is not None:
-                    target_provider, new_model, resolved_alias = fallback_result
-                    logger.debug(
-                        "Alias '%s' resolved via fallback to %s on %s",
-                        resolved_alias, new_model, target_provider,
-                    )
-                else:
-                    identity = MODEL_ALIASES[key]
-                    return ModelSwitchResult(
-                        success=False,
-                        is_global=is_global,
-                        error_message=(
-                            f"Alias '{key}' maps to {identity.vendor}/{identity.family} "
-                            f"but no matching model was found in any provider catalog. "
-                            f"Try specifying the full model name."
-                        ),
-                    )
             else:
-                # --- Step c: On aggregator, convert vendor:model to vendor/model ---
-                # Only convert when there's no slash — a slash means the name
-                # is already in vendor/model format and the colon is a variant
-                # tag (:free, :extended, :fast) that must be preserved.
-                colon_pos = raw_input.find(":")
-                if colon_pos > 0 and "/" not in raw_input and is_aggregator(current_provider):
-                    left = raw_input[:colon_pos].strip().lower()
-                    right = raw_input[colon_pos + 1:].strip()
-                    if left and right:
-                        # Colons become slashes for aggregator slugs
-                        new_model = f"{left}/{right}"
+                # --- Step b: Alias exists but not on current provider -> fallback ---
+                key = raw_input.strip().lower()
+                if key in MODEL_ALIASES:
+                    authed = get_authenticated_provider_slugs(
+                        current_provider=current_provider,
+                        user_providers=user_providers,
+                        custom_providers=custom_providers,
+                    )
+                    fallback_result = _resolve_alias_fallback(raw_input, authed)
+                    if fallback_result is not None:
+                        target_provider, new_model, resolved_alias = fallback_result
                         logger.debug(
-                            "Converted vendor:model '%s' to aggregator slug '%s'",
-                            raw_input, new_model,
+                            "Alias '%s' resolved via fallback to %s on %s",
+                            resolved_alias, new_model, target_provider,
                         )
-
-        # --- Step d: Aggregator catalog search ---
-        if is_aggregator(target_provider) and not resolved_alias:
-            catalog = list_provider_models(target_provider)
-            if catalog:
-                new_model_lower = new_model.lower()
-                for mid in catalog:
-                    if mid.lower() == new_model_lower:
-                        new_model = mid
-                        break
+                    else:
+                        identity = MODEL_ALIASES[key]
+                        return ModelSwitchResult(
+                            success=False,
+                            is_global=is_global,
+                            error_message=(
+                                f"Alias '{key}' maps to {identity.vendor}/{identity.family} "
+                                f"but no matching model was found in any provider catalog. "
+                                f"Try specifying the full model name."
+                            ),
+                        )
                 else:
+                    # --- Step c: On aggregator, convert vendor:model to vendor/model ---
+                    # Only convert when there's no slash — a slash means the name
+                    # is already in vendor/model format and the colon is a variant
+                    # tag (:free, :extended, :fast) that must be preserved.
+                    colon_pos = raw_input.find(":")
+                    if colon_pos > 0 and "/" not in raw_input and is_aggregator(current_provider):
+                        left = raw_input[:colon_pos].strip().lower()
+                        right = raw_input[colon_pos + 1:].strip()
+                        if left and right:
+                            # Colons become slashes for aggregator slugs
+                            new_model = f"{left}/{right}"
+                            logger.debug(
+                                "Converted vendor:model '%s' to aggregator slug '%s'",
+                                raw_input, new_model,
+                            )
+
+            # --- Step d: Aggregator catalog search ---
+            if is_aggregator(target_provider) and not resolved_alias:
+                catalog = list_provider_models(target_provider)
+                if catalog:
+                    new_model_lower = new_model.lower()
                     for mid in catalog:
-                        if "/" in mid:
-                            _, bare = mid.split("/", 1)
-                            if bare.lower() == new_model_lower:
-                                new_model = mid
-                                break
+                        if mid.lower() == new_model_lower:
+                            new_model = mid
+                            break
+                    else:
+                        for mid in catalog:
+                            if "/" in mid:
+                                _, bare = mid.split("/", 1)
+                                if bare.lower() == new_model_lower:
+                                    new_model = mid
+                                    break
 
-        # --- Step e: detect_provider_for_model() as last resort ---
-        _base = current_base_url or ""
-        is_custom = current_provider in ("custom", "local") or (
-            "localhost" in _base or "127.0.0.1" in _base
-        )
+            # --- Step e: detect_provider_for_model() as last resort ---
+            _base = current_base_url or ""
+            is_custom = current_provider in ("custom", "local") or (
+                "localhost" in _base or "127.0.0.1" in _base
+            )
 
-        if (
-            target_provider == current_provider
-            and not is_custom
-            and not resolved_alias
-        ):
-            detected = detect_provider_for_model(new_model, current_provider)
-            if detected:
-                target_provider, new_model = detected
+            if (
+                target_provider == current_provider
+                and not is_custom
+                and not resolved_alias
+            ):
+                detected = detect_provider_for_model(new_model, current_provider)
+                if detected:
+                    target_provider, new_model = detected
 
     # =================================================================
     # COMMON PATH: Resolve credentials, normalize, get metadata
@@ -671,6 +804,14 @@ def switch_model(
             api_mode = runtime.get("api_mode", "")
         except Exception:
             pass
+
+    # Apply config-backed or direct-alias overrides after provider resolution.
+    if override_base_url:
+        base_url = override_base_url
+        if override_api_key:
+            api_key = override_api_key
+        elif not api_key:
+            api_key = "no-key-required"
 
     # --- Direct alias override: use exact base_url from the alias if set ---
     if resolved_alias:
@@ -752,7 +893,7 @@ def switch_model(
         api_mode=api_mode,
         warning_message=" | ".join(warnings) if warnings else "",
         provider_label=provider_label,
-        resolved_via_alias=resolved_alias,
+        resolved_via_alias=resolved_alias or model_query_via,
         capabilities=capabilities,
         model_info=model_info,
         is_global=is_global,
