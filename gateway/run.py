@@ -1923,7 +1923,10 @@ class GatewayRunner:
 
         if canonical == "provider":
             return await self._handle_provider_command(event)
-        
+
+        if canonical == "models-list":
+            return await self._handle_models_list_command(event)
+
         if canonical == "personality":
             return await self._handle_personality_command(event)
 
@@ -3283,7 +3286,44 @@ class GatewayRunner:
         lines.append("Switch: `/model provider:model-name`")
         lines.append("Setup: `hermes setup`")
         return "\n".join(lines)
-    
+
+    async def _handle_models_list_command(self, event: MessageEvent) -> str:
+        """Handle /models-list command - show fallback model chain."""
+        import yaml
+
+        config_path = _hermes_home / "config.yaml"
+        try:
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+            else:
+                return "config.yaml not found."
+        except Exception as e:
+            return f"Failed to read config: {e}"
+
+        fallback = cfg.get("fallback_model", [])
+        model_cfg = cfg.get("model", {})
+        primary_model = model_cfg.get("default") or model_cfg.get("model", "unknown") if isinstance(model_cfg, dict) else "unknown"
+        primary_provider = model_cfg.get("provider", "unknown") if isinstance(model_cfg, dict) else "unknown"
+
+        lines = [
+            f"◆ **Active model:** `{primary_model}` ({primary_provider})",
+            "",
+            "**Fallback chain:**",
+        ]
+
+        if not fallback:
+            lines.append("_(none configured)_")
+        else:
+            for i, entry in enumerate(fallback, start=1):
+                model = entry.get("model", "unknown")
+                provider = entry.get("provider", "unknown")
+                base_url = entry.get("base_url", "")
+                endpoint = f" @ {base_url}" if base_url else ""
+                lines.append(f"{i}. `{model}` ({provider}{endpoint})")
+
+        return "\n".join(lines)
+
     async def _handle_personality_command(self, event: MessageEvent) -> str:
         """Handle /personality command - list or set a personality."""
         import yaml

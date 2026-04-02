@@ -84,6 +84,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True),
     CommandDef("provider", "Show available providers and current provider",
                "Configuration"),
+    CommandDef("models-list", "List all models in the fallback chain",
+               "Configuration", aliases=("ml",)),
     CommandDef("model", "Show or switch the active model. Usage: /model [provider:model|model]",
                "Configuration", aliases=("m",), args_hint="[provider:model|model]",
                cli_only=True),

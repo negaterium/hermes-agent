@@ -3383,6 +3383,39 @@ class HermesCLI:
         remaining = len(self.conversation_history)
         print(f"  {remaining} message(s) remaining in history.")
     
+    def _handle_models_list_command(self):
+        """Handle /models-list — show primary model + fallback chain."""
+        import yaml
+        config_path = _hermes_home / "config.yaml"
+        try:
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+            else:
+                _cprint("config.yaml not found.")
+                return
+        except Exception as e:
+            _cprint(f"Failed to read config: {e}")
+            return
+
+        fallback = cfg.get("fallback_model", [])
+        model_cfg = cfg.get("model", {})
+        primary_model = model_cfg.get("default") or model_cfg.get("model", "unknown") if isinstance(model_cfg, dict) else "unknown"
+        primary_provider = model_cfg.get("provider", "unknown") if isinstance(model_cfg, dict) else "unknown"
+
+        _cprint(f"\n◆ Active model: {primary_model} ({primary_provider})\n")
+        _cprint("Fallback chain:")
+        if not fallback:
+            _cprint("  (none configured)")
+        else:
+            for i, entry in enumerate(fallback, start=1):
+                model = entry.get("model", "unknown")
+                provider = entry.get("provider", "unknown")
+                base_url = entry.get("base_url", "")
+                endpoint = f" @ {base_url}" if base_url else ""
+                _cprint(f"  {i}. {model} ({provider}{endpoint})")
+        _cprint("")
+
     def _show_model_and_providers(self):
         """Show current model + provider and list all authenticated providers.
 
@@ -4251,6 +4284,8 @@ class HermesCLI:
             self._handle_resume_command(cmd_original)
         elif canonical == "provider":
             self._show_model_and_providers()
+        elif canonical == "models-list":
+            self._handle_models_list_command()
         elif canonical == "model":
             self._handle_model_command(cmd_original)
         elif canonical == "prompt":
