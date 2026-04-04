@@ -31,4 +31,9 @@ if [ -d "$INSTALL_DIR/skills" ]; then
     python3 "$INSTALL_DIR/tools/skills_sync.py"
 fi
 
-exec hermes "$@"
+# Ensure the data volume is owned by the hermes user (handles first-run and
+# host-created volumes that may be root-owned).
+chown -R hermes:hermes "$HERMES_HOME" 2>/dev/null || true
+
+# Drop from root to the hermes user before executing the application.
+exec gosu hermes hermes "$@"

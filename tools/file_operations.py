@@ -480,7 +480,11 @@ class ShellFileOperations(FileOperations):
         """
         # Expand ~ and other shell paths
         path = self._expand_path(path)
-        
+
+        # Defense-in-depth: ensure offset/limit are ints before shell interpolation
+        offset = int(offset)
+        limit = int(limit)
+
         # Clamp limit
         limit = min(limit, MAX_LINES)
         
@@ -874,6 +878,10 @@ class ShellFileOperations(FileOperations):
     
     def _search_files(self, pattern: str, path: str, limit: int, offset: int) -> SearchResult:
         """Search for files by name pattern (glob-like)."""
+        # Defense-in-depth: ensure limit/offset are ints before shell interpolation
+        limit = int(limit)
+        offset = int(offset)
+
         # Auto-prepend **/ for recursive search if not already present
         if not pattern.startswith('**/') and '/' not in pattern:
             search_pattern = pattern
