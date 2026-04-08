@@ -24,10 +24,11 @@ logger = logging.getLogger(__name__)
 # are preserved so the full model name reaches cache lookups and server queries.
 _PROVIDER_PREFIXES: frozenset[str] = frozenset({
     "openrouter", "nous", "openai-codex", "copilot", "copilot-acp",
-    "zai", "kimi-coding", "minimax", "minimax-cn", "anthropic", "deepseek",
+    "gemini", "zai", "kimi-coding", "minimax", "minimax-cn", "anthropic", "deepseek",
     "opencode-zen", "opencode-go", "ai-gateway", "kilocode", "alibaba",
     "custom", "local",
     # Common aliases
+    "google", "google-gemini", "google-ai-studio",
     "glm", "z-ai", "z.ai", "zhipu", "github", "github-copilot",
     "github-models", "kimi", "moonshot", "claude", "deep-seek",
     "opencode", "zen", "go", "vercel", "kilo", "dashscope", "aliyun", "qwen",
@@ -101,6 +102,11 @@ DEFAULT_CONTEXT_LENGTHS = {
     "gpt-4": 128000,
     # Google
     "gemini": 1048576,
+    # Gemma (open models served via AI Studio)
+    "gemma-4-31b": 256000,
+    "gemma-4-26b": 256000,
+    "gemma-3": 131072,
+    "gemma": 8192,  # fallback for older gemma models
     # DeepSeek
     "deepseek": 128000,
     # Meta
@@ -113,6 +119,8 @@ DEFAULT_CONTEXT_LENGTHS = {
     "glm": 202752,
     # Kimi
     "kimi": 262144,
+    # Arcee
+    "trinity": 262144,
     # Hugging Face Inference Providers — model IDs use org/name format
     "Qwen/Qwen3.5-397B-A17B": 131072,
     "Qwen/Qwen3.5-35B-A3B": 131072,
@@ -121,6 +129,8 @@ DEFAULT_CONTEXT_LENGTHS = {
     "moonshotai/Kimi-K2-Thinking": 262144,
     "MiniMaxAI/MiniMax-M2.5": 204800,
     "XiaomiMiMo/MiMo-V2-Flash": 32768,
+    "mimo-v2-pro": 1048576,
+    "mimo-v2-omni": 1048576,
     "zai-org/GLM-5": 202752,
 }
 
@@ -171,7 +181,7 @@ _URL_TO_PROVIDER: Dict[str, str] = {
     "dashscope.aliyuncs.com": "alibaba",
     "dashscope-intl.aliyuncs.com": "alibaba",
     "openrouter.ai": "openrouter",
-    "generativelanguage.googleapis.com": "google",
+    "generativelanguage.googleapis.com": "gemini",
     "inference-api.nousresearch.com": "nous",
     "api.deepseek.com": "deepseek",
     "api.githubcopilot.com": "copilot",
@@ -500,8 +510,8 @@ def fetch_endpoint_model_metadata(
 
 def _get_context_cache_path() -> Path:
     """Return path to the persistent context length cache file."""
-    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-    return hermes_home / "context_length_cache.yaml"
+    from hermes_constants import get_hermes_home
+    return get_hermes_home() / "context_length_cache.yaml"
 
 
 def _load_context_cache() -> Dict[str, int]:
@@ -599,6 +609,59 @@ def _model_id_matches(candidate_id: str, lookup_model: str) -> bool:
     if "/" in candidate_id and candidate_id.rsplit("/", 1)[1] == lookup_model:
         return True
     return False
+
+
+def query_ollama_num_ctx(model: str, base_url: str) -> Optional[int]:
+    """Query an Ollama server for the model's context length.
+
+    Returns the model's maximum context from GGUF metadata via ``/api/show``,
+    or the explicit ``num_ctx`` from the Modelfile if set.  Returns None if
+    the server is unreachable or not Ollama.
+
+    This is the value that should be passed as ``num_ctx`` in Ollama chat
+    requests to override the default 2048.
+    """
+    import httpx
+
+    bare_model = _strip_provider_prefix(model)
+    server_url = base_url.rstrip("/")
+    if server_url.endswith("/v1"):
+        server_url = server_url[:-3]
+
+    try:
+        server_type = detect_local_server_type(base_url)
+    except Exception:
+        return None
+    if server_type != "ollama":
+        return None
+
+    try:
+        with httpx.Client(timeout=3.0) as client:
+            resp = client.post(f"{server_url}/api/show", json={"name": bare_model})
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+
+            # Prefer explicit num_ctx from Modelfile parameters (user override)
+            params = data.get("parameters", "")
+            if "num_ctx" in params:
+                for line in params.split("\n"):
+                    if "num_ctx" in line:
+                        parts = line.strip().split()
+                        if len(parts) >= 2:
+                            try:
+                                return int(parts[-1])
+                            except ValueError:
+                                pass
+
+            # Fall back to GGUF model_info context_length (training max)
+            model_info = data.get("model_info", {})
+            for key, value in model_info.items():
+                if "context_length" in key and isinstance(value, (int, float)):
+                    return int(value)
+    except Exception:
+        pass
+    return None
 
 
 def _query_local_context_length(model: str, base_url: str) -> Optional[int]:
