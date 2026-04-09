@@ -140,6 +140,23 @@ class DirectAlias(NamedTuple):
     model: str
     provider: str
     base_url: str
+    source: str = "model_aliases"
+
+
+@dataclass(frozen=True)
+class ConfiguredModelTarget:
+    """Configured model target from config.yaml.
+
+    Used for both explicit ``model_aliases`` and fallback chains so `/model`
+    can resolve trusted user-defined endpoints before catalog detection.
+    """
+
+    alias: str
+    model: str
+    provider: str
+    base_url: str = ""
+    api_key: str = ""
+    source: str = "model_aliases"
 
 
 # Built-in direct aliases (can be extended via config.yaml model_aliases:)
@@ -147,49 +164,191 @@ _BUILTIN_DIRECT_ALIASES: dict[str, DirectAlias] = {}
 
 # Merged dict (builtins + user config); populated by _load_direct_aliases()
 DIRECT_ALIASES: dict[str, DirectAlias] = {}
+CONFIGURED_MODEL_TARGETS: list[ConfiguredModelTarget] = []
+CONFIG_CACHE_MTIME: float | None = None
 
 
-def _load_direct_aliases() -> dict[str, DirectAlias]:
-    """Load direct aliases from config.yaml ``model_aliases:`` section.
+def _coerce_configured_target(
+    entry: dict,
+    *,
+    alias_name: str,
+    source: str,
+) -> Optional[ConfiguredModelTarget]:
+    if not isinstance(entry, dict):
+        return None
+    model = str(entry.get("model") or "").strip()
+    provider = str(entry.get("provider") or "").strip()
+    if not model or not provider:
+        return None
+    return ConfiguredModelTarget(
+        alias=alias_name.strip().lower(),
+        model=model,
+        provider=provider,
+        base_url=str(entry.get("base_url", "") or ""),
+        api_key=str(entry.get("api_key", "") or ""),
+        source=source,
+    )
 
-    Config format::
 
-        model_aliases:
-          qwen:
-            model: "qwen3.5:397b"
-            provider: custom
-            base_url: "https://ollama.com/v1"
-          minimax:
-            model: "minimax-m2.7"
-            provider: custom
-            base_url: "https://ollama.com/v1"
+def _load_configured_model_targets() -> list[ConfiguredModelTarget]:
+    """Load trusted user-defined model targets from config.yaml.
+
+    Sources:
+    - ``model_aliases``: explicit named aliases for local/custom endpoints.
+    - ``fallback_providers`` / legacy ``fallback_model``: fallback chain entries
+      that should remain directly switchable via `/model <model>`.
     """
-    merged = dict(_BUILTIN_DIRECT_ALIASES)
+    targets: list[ConfiguredModelTarget] = []
     try:
         from hermes_cli.config import load_config
+
         cfg = load_config()
+
         user_aliases = cfg.get("model_aliases")
         if isinstance(user_aliases, dict):
             for name, entry in user_aliases.items():
-                if not isinstance(entry, dict):
-                    continue
-                model = entry.get("model", "")
-                provider = entry.get("provider", "custom")
-                base_url = entry.get("base_url", "")
-                if model:
-                    merged[name.strip().lower()] = DirectAlias(
-                        model=model, provider=provider, base_url=base_url,
-                    )
+                target = _coerce_configured_target(
+                    entry,
+                    alias_name=str(name or ""),
+                    source="model_aliases",
+                )
+                if target is not None:
+                    targets.append(target)
+
+        fallback_entries = cfg.get("fallback_providers") or cfg.get("fallback_model") or []
+        if isinstance(fallback_entries, dict):
+            fallback_entries = [fallback_entries]
+        if isinstance(fallback_entries, list):
+            for index, entry in enumerate(fallback_entries, start=1):
+                alias_name = ""
+                if isinstance(entry, dict):
+                    alias_name = str(entry.get("alias") or entry.get("name") or entry.get("model") or f"fallback-{index}")
+                target = _coerce_configured_target(
+                    entry,
+                    alias_name=alias_name,
+                    source="fallback_providers",
+                )
+                if target is not None:
+                    targets.append(target)
     except Exception:
         pass
+
+    deduped: list[ConfiguredModelTarget] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for target in targets:
+        key = (
+            target.alias,
+            target.model.lower(),
+            target.provider.lower(),
+            target.base_url,
+            target.source,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(target)
+    return deduped
+
+
+def _config_cache_mtime() -> float | None:
+    try:
+        from hermes_cli.config import get_config_path
+
+        path = get_config_path()
+        if path.exists():
+            return path.stat().st_mtime
+    except Exception:
+        pass
+    return None
+
+
+def _refresh_configured_model_cache(force: bool = False) -> None:
+    """Refresh cached model aliases when config.yaml changes.
+
+    This keeps `/model` responsive to edits without requiring a process restart,
+    while avoiding re-parsing the file on every call when the timestamp is stable.
+    """
+    global DIRECT_ALIASES, CONFIGURED_MODEL_TARGETS, CONFIG_CACHE_MTIME
+
+    current_mtime = _config_cache_mtime()
+    if not force:
+        if DIRECT_ALIASES or CONFIGURED_MODEL_TARGETS:
+            # Allow tests / callers to seed caches explicitly without the on-disk
+            # config immediately overwriting them.  Once a cache is populated,
+            # it stays until the config mtime changes.
+            if CONFIG_CACHE_MTIME is None:
+                return
+            if current_mtime == CONFIG_CACHE_MTIME:
+                return
+
+    DIRECT_ALIASES = _load_direct_aliases()
+    CONFIGURED_MODEL_TARGETS = _load_configured_model_targets()
+    CONFIG_CACHE_MTIME = current_mtime
+
+
+def _load_direct_aliases() -> dict[str, DirectAlias]:
+    """Load direct aliases from config-backed model targets.
+
+    ``model_aliases`` provide explicit names. ``fallback_providers`` entries are
+    also injected as aliases so their model IDs remain first-class `/model`
+    targets even after the shared switch pipeline refactor.
+    """
+    merged = dict(_BUILTIN_DIRECT_ALIASES)
+    for target in _load_configured_model_targets():
+        if target.alias:
+            merged[target.alias] = DirectAlias(
+                model=target.model,
+                provider=target.provider,
+                base_url=target.base_url,
+                source=target.source,
+            )
     return merged
 
 
 def _ensure_direct_aliases() -> None:
-    """Lazy-load direct aliases on first use."""
-    global DIRECT_ALIASES
-    if not DIRECT_ALIASES:
-        DIRECT_ALIASES = _load_direct_aliases()
+    """Lazy-load direct aliases and configured targets on first use."""
+    _refresh_configured_model_cache()
+
+
+def resolve_configured_model_target(raw_input: str) -> Optional[ConfiguredModelTarget]:
+    """Resolve a trusted config-backed model target.
+
+    Match order:
+    1. exact alias
+    2. exact model id
+    3. substring alias
+    4. substring model id
+
+    This restores the old local-branch behavior where fallback list entries
+    remained directly selectable even when live API validation was unavailable.
+    """
+    key = raw_input.strip().lower()
+    if not key:
+        return None
+
+    _ensure_direct_aliases()
+
+    exact_alias = next((t for t in CONFIGURED_MODEL_TARGETS if t.alias == key), None)
+    if exact_alias is not None:
+        return exact_alias
+
+    exact_model = next((t for t in CONFIGURED_MODEL_TARGETS if t.model.lower() == key), None)
+    if exact_model is not None:
+        return exact_model
+
+    partial_aliases = [t for t in CONFIGURED_MODEL_TARGETS if key in t.alias]
+    if len(partial_aliases) == 1:
+        return partial_aliases[0]
+
+    partial_models = [t for t in CONFIGURED_MODEL_TARGETS if key in t.model.lower()]
+    if len(partial_models) == 1:
+        return partial_models[0]
+
+    if partial_models:
+        partial_models.sort(key=lambda t: (len(t.model), len(t.alias or t.model)))
+        return partial_models[0]
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +530,46 @@ def _resolve_alias_fallback(
 
 
 # ---------------------------------------------------------------------------
+# Validation warning handling
+# ---------------------------------------------------------------------------
+
+
+def _should_suppress_validation_warning(
+    message: str,
+    *,
+    target_provider: str,
+    model_name: str,
+    resolved_alias: str,
+) -> bool:
+    """Suppress noisy validation warnings for trusted switch targets.
+
+    If a model is already known via config-backed aliases/fallbacks or appears in
+    the provider's curated/static model list, an unreachable `/models` endpoint
+    should not pollute `/model` output with a misleading warning.
+    """
+    if not message:
+        return False
+
+    lowered = message.strip().lower()
+    if "could not reach" not in lowered:
+        return False
+
+    if resolved_alias:
+        return True
+
+    try:
+        from hermes_cli.models import provider_model_ids
+
+        known_models = provider_model_ids(target_provider)
+        if any(model_name.lower() == str(mid).lower() for mid in known_models):
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Core model-switching pipeline
 # ---------------------------------------------------------------------------
 
@@ -430,6 +629,7 @@ def switch_model(
     resolved_alias = ""
     new_model = raw_input.strip()
     target_provider = current_provider
+    configured_target_match: Optional[ConfiguredModelTarget] = None
 
     # =================================================================
     # PATH A: Explicit --provider given
@@ -500,57 +700,69 @@ def switch_model(
     # PATH B: No explicit provider — resolve from model input
     # =================================================================
     else:
-        # --- Step a: Try alias resolution on current provider ---
-        alias_result = resolve_alias(raw_input, current_provider)
-
-        if alias_result is not None:
-            target_provider, new_model, resolved_alias = alias_result
+        # --- Step a: trusted config-backed targets (model_aliases + fallback chain) ---
+        configured_target = resolve_configured_model_target(raw_input)
+        if configured_target is not None:
+            configured_target_match = configured_target
+            target_provider = configured_target.provider
+            new_model = configured_target.model
+            resolved_alias = configured_target.alias or configured_target.model
             logger.debug(
-                "Alias '%s' resolved to %s on %s",
-                resolved_alias, new_model, target_provider,
+                "Configured target '%s' resolved to %s on %s (%s)",
+                raw_input, new_model, target_provider, configured_target.source,
             )
         else:
-            # --- Step b: Alias exists but not on current provider -> fallback ---
-            key = raw_input.strip().lower()
-            if key in MODEL_ALIASES:
-                authed = get_authenticated_provider_slugs(
-                    current_provider=current_provider,
-                    user_providers=user_providers,
+            # --- Step b: Try alias resolution on current provider ---
+            alias_result = resolve_alias(raw_input, current_provider)
+
+            if alias_result is not None:
+                target_provider, new_model, resolved_alias = alias_result
+                logger.debug(
+                    "Alias '%s' resolved to %s on %s",
+                    resolved_alias, new_model, target_provider,
                 )
-                fallback_result = _resolve_alias_fallback(raw_input, authed)
-                if fallback_result is not None:
-                    target_provider, new_model, resolved_alias = fallback_result
-                    logger.debug(
-                        "Alias '%s' resolved via fallback to %s on %s",
-                        resolved_alias, new_model, target_provider,
-                    )
-                else:
-                    identity = MODEL_ALIASES[key]
-                    return ModelSwitchResult(
-                        success=False,
-                        is_global=is_global,
-                        error_message=(
-                            f"Alias '{key}' maps to {identity.vendor}/{identity.family} "
-                            f"but no matching model was found in any provider catalog. "
-                            f"Try specifying the full model name."
-                        ),
-                    )
             else:
-                # --- Step c: On aggregator, convert vendor:model to vendor/model ---
-                # Only convert when there's no slash — a slash means the name
-                # is already in vendor/model format and the colon is a variant
-                # tag (:free, :extended, :fast) that must be preserved.
-                colon_pos = raw_input.find(":")
-                if colon_pos > 0 and "/" not in raw_input and is_aggregator(current_provider):
-                    left = raw_input[:colon_pos].strip().lower()
-                    right = raw_input[colon_pos + 1:].strip()
-                    if left and right:
-                        # Colons become slashes for aggregator slugs
-                        new_model = f"{left}/{right}"
+                # --- Step c: Alias exists but not on current provider -> fallback ---
+                key = raw_input.strip().lower()
+                if key in MODEL_ALIASES:
+                    authed = get_authenticated_provider_slugs(
+                        current_provider=current_provider,
+                        user_providers=user_providers,
+                    )
+                    fallback_result = _resolve_alias_fallback(raw_input, authed)
+                    if fallback_result is not None:
+                        target_provider, new_model, resolved_alias = fallback_result
                         logger.debug(
-                            "Converted vendor:model '%s' to aggregator slug '%s'",
-                            raw_input, new_model,
+                            "Alias '%s' resolved via fallback to %s on %s",
+                            resolved_alias, new_model, target_provider,
                         )
+                    else:
+                        identity = MODEL_ALIASES[key]
+                        return ModelSwitchResult(
+                            success=False,
+                            is_global=is_global,
+                            error_message=(
+                                f"Alias '{key}' maps to {identity.vendor}/{identity.family} "
+                                f"but no matching model was found in any provider catalog. "
+                                f"Try specifying the full model name."
+                            ),
+                        )
+                else:
+                    # --- Step d: On aggregator, convert vendor:model to vendor/model ---
+                    # Only convert when there's no slash — a slash means the name
+                    # is already in vendor/model format and the colon is a variant
+                    # tag (:free, :extended, :fast) that must be preserved.
+                    colon_pos = raw_input.find(":")
+                    if colon_pos > 0 and "/" not in raw_input and is_aggregator(current_provider):
+                        left = raw_input[:colon_pos].strip().lower()
+                        right = raw_input[colon_pos + 1:].strip()
+                        if left and right:
+                            # Colons become slashes for aggregator slugs
+                            new_model = f"{left}/{right}"
+                            logger.debug(
+                                "Converted vendor:model '%s' to aggregator slug '%s'",
+                                raw_input, new_model,
+                            )
 
         # --- Step d: Aggregator catalog search ---
         if is_aggregator(target_provider) and not resolved_alias:
@@ -622,8 +834,15 @@ def switch_model(
         except Exception:
             pass
 
-    # --- Direct alias override: use exact base_url from the alias if set ---
-    if resolved_alias:
+    # --- Direct/configured target override: use exact endpoint details if set ---
+    if configured_target_match is not None:
+        if configured_target_match.base_url:
+            base_url = configured_target_match.base_url
+        if configured_target_match.api_key:
+            api_key = configured_target_match.api_key
+        elif configured_target_match.base_url and not api_key:
+            api_key = "no-key-required"
+    elif resolved_alias:
         _ensure_direct_aliases()
         _da = DIRECT_ALIASES.get(resolved_alias)
         if _da is not None and _da.base_url:
@@ -677,8 +896,14 @@ def switch_model(
 
     # --- Collect warnings ---
     warnings: list[str] = []
-    if validation.get("message"):
-        warnings.append(validation["message"])
+    validation_message = validation.get("message")
+    if validation_message and not _should_suppress_validation_warning(
+        validation_message,
+        target_provider=target_provider,
+        model_name=new_model,
+        resolved_alias=resolved_alias,
+    ):
+        warnings.append(validation_message)
     hermes_warn = _check_hermes_model_warning(new_model)
     if hermes_warn:
         warnings.append(hermes_warn)

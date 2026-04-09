@@ -930,17 +930,15 @@ def detect_provider_for_model(
             break
 
     if direct_match:
-        # Check if we have credentials for this provider
+        # Check if we have usable credentials for this provider.
+        # Use the shared auth resolver instead of raw env-var checks so
+        # providers with custom token flows (notably Copilot) are detected.
         has_creds = False
         try:
-            from hermes_cli.auth import PROVIDER_REGISTRY
-            pconfig = PROVIDER_REGISTRY.get(direct_match)
-            if pconfig:
-                import os
-                for env_var in pconfig.api_key_env_vars:
-                    if os.getenv(env_var, "").strip():
-                        has_creds = True
-                        break
+            from hermes_cli.auth import resolve_api_key_provider_credentials, has_usable_secret
+
+            creds = resolve_api_key_provider_credentials(direct_match)
+            has_creds = has_usable_secret(creds.get("api_key", ""))
         except Exception:
             pass
 
