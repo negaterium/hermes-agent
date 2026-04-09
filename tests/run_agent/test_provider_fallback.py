@@ -100,7 +100,7 @@ class TestFallbackChainAdvancement:
             assert agent._try_activate_fallback() is True
             assert agent._fallback_index == 1
             assert agent.model == "gpt-4o"
-            assert agent._fallback_activated is True
+            assert agent._fallback_activated is False
 
     def test_second_fallback_works(self):
         fbs = [

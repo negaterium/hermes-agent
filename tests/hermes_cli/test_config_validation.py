@@ -97,7 +97,7 @@ class TestCustomProvidersValidation:
 
 
 class TestFallbackModelValidation:
-    """fallback_model should be a top-level dict with provider + model."""
+    """fallback_model remains valid as a legacy single-entry fallback."""
 
     def test_missing_provider(self):
         issues = validate_config_structure({
@@ -128,6 +128,18 @@ class TestFallbackModelValidation:
         })
         assert any("should be a dict" in i.message for i in issues)
 
+    def test_list_fallback_model_warns_legacy_format(self):
+        issues = validate_config_structure({
+            "fallback_model": [
+                {"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+                {"provider": "custom", "model": "qwen3.5:9b", "base_url": "http://example/v1"},
+            ],
+        })
+        fallback_issues = [i for i in issues if "fallback_model" in i.message.lower()]
+        assert fallback_issues
+        assert all(i.severity != "error" for i in fallback_issues)
+        assert any("legacy list-based chain format" in i.message for i in fallback_issues)
+
     def test_empty_fallback_dict_no_issues(self):
         """Empty fallback_model dict means disabled — no warnings needed."""
         issues = validate_config_structure({
@@ -135,6 +147,32 @@ class TestFallbackModelValidation:
         })
         fb_issues = [i for i in issues if "fallback" in i.message.lower()]
         assert len(fb_issues) == 0
+
+
+class TestFallbackProvidersValidation:
+    def test_valid_fallback_providers_list(self):
+        issues = validate_config_structure({
+            "fallback_providers": [
+                {"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+                {"provider": "custom", "model": "qwen3.5:9b", "base_url": "http://example/v1"},
+            ],
+        })
+        fb_issues = [i for i in issues if "fallback" in i.message.lower()]
+        assert len(fb_issues) == 0
+
+    def test_non_list_fallback_providers_errors(self):
+        issues = validate_config_structure({
+            "fallback_providers": {"provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+        })
+        assert any("fallback_providers should be a list" in i.message for i in issues)
+
+    def test_missing_fields_warn(self):
+        issues = validate_config_structure({
+            "fallback_providers": [{"provider": "openrouter"}, {"model": "qwen3.5:9b"}],
+        })
+        messages = [i.message for i in issues]
+        assert any("missing 'model'" in m for m in messages)
+        assert any("missing 'provider'" in m for m in messages)
 
 
 class TestMissingModelSection:

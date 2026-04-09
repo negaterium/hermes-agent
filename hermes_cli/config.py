@@ -39,6 +39,7 @@ _EXTRA_ENV_KEYS = frozenset({
     "DINGTALK_CLIENT_ID", "DINGTALK_CLIENT_SECRET",
     "FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_ENCRYPT_KEY", "FEISHU_VERIFICATION_TOKEN",
     "WECOM_BOT_ID", "WECOM_SECRET",
+    "BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_PASSWORD",
     "TERMINAL_ENV", "TERMINAL_SSH_KEY", "TERMINAL_SSH_PORT",
     "WHATSAPP_MODE", "WHATSAPP_ENABLED",
     "MATTERMOST_HOME_CHANNEL", "MATTERMOST_REPLY_MODE",
@@ -157,7 +158,14 @@ def get_project_root() -> Path:
     return Path(__file__).parent.parent.resolve()
 
 def _secure_dir(path):
-    """Set directory to owner-only access (0700). No-op on Windows."""
+    """Set directory to owner-only access (0700). No-op on Windows.
+
+    Skipped in managed mode — the NixOS module sets group-readable
+    permissions (0750) so interactive users in the hermes group can
+    share state with the gateway service.
+    """
+    if is_managed():
+        return
     try:
         os.chmod(path, 0o700)
     except (OSError, NotImplementedError):
@@ -165,7 +173,13 @@ def _secure_dir(path):
 
 
 def _secure_file(path):
-    """Set file to owner-only read/write (0600). No-op on Windows."""
+    """Set file to owner-only read/write (0600). No-op on Windows.
+
+    Skipped in managed mode — the NixOS activation script sets
+    group-readable permissions (0640) on config files.
+    """
+    if is_managed():
+        return
     try:
         if os.path.exists(str(path)):
             os.chmod(path, 0o600)
@@ -217,6 +231,10 @@ DEFAULT_CONFIG = {
         # (force on/off for all models), or a list of model-name substrings
         # to match (e.g. ["gpt", "codex", "gemini", "qwen"]).
         "tool_use_enforcement": "auto",
+        # Staged inactivity warning: send a warning to the user at this
+        # threshold before escalating to a full timeout.  The warning fires
+        # once per run and does not interrupt the agent.  0 = disable warning.
+        "gateway_timeout_warning": 900,
     },
     
     "terminal": {
@@ -379,6 +397,7 @@ DEFAULT_CONFIG = {
         "show_cost": False,       # Show $ cost in the status bar (off by default)
         "skin": "default",
         "tool_progress_command": False,  # Enable /verbose command in messaging gateway
+        "tool_progress_overrides": {},  # Per-platform overrides: {"signal": "off", "telegram": "all"}
         "tool_preview_length": 0,  # Max chars for tool call previews (0 = no limit, show full paths/commands)
     },
 
@@ -413,13 +432,16 @@ DEFAULT_CONFIG = {
     
     "stt": {
         "enabled": True,
-        "provider": "local",  # "local" (free, faster-whisper) | "groq" | "openai" (Whisper API)
+        "provider": "local",  # "local" (free, faster-whisper) | "groq" | "openai" (Whisper API) | "mistral" (Voxtral Transcribe)
         "local": {
             "model": "base",  # tiny, base, small, medium, large-v3
             "language": "",  # auto-detect by default; set to "en", "es", "fr", etc. to force
         },
         "openai": {
             "model": "whisper-1",  # whisper-1, gpt-4o-mini-transcribe, gpt-4o-transcribe
+        },
+        "mistral": {
+            "model": "voxtral-mini-latest",  # voxtral-mini-latest, voxtral-mini-2602
         },
     },
 
@@ -547,7 +569,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 12,
+    "_config_version": 13,
 }
 
 # =============================================================================
@@ -720,6 +742,14 @@ OPTIONAL_ENV_VARS = {
         "description": "Custom DashScope base URL (default: coding-intl OpenAI-compat endpoint)",
         "prompt": "DashScope Base URL",
         "url": "",
+        "password": False,
+        "category": "provider",
+        "advanced": True,
+    },
+    "HERMES_QWEN_BASE_URL": {
+        "description": "Qwen Portal base URL override (default: https://portal.qwen.ai/v1)",
+        "prompt": "Qwen Portal base URL (leave empty for default)",
+        "url": None,
         "password": False,
         "category": "provider",
         "advanced": True,
@@ -971,6 +1001,13 @@ OPTIONAL_ENV_VARS = {
     "DISCORD_ALLOWED_USERS": {
         "description": "Comma-separated Discord user IDs allowed to use the bot",
         "prompt": "Allowed Discord user IDs (comma-separated)",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
+    "DISCORD_REPLY_TO_MODE": {
+        "description": "Discord reply threading mode: 'off' (no reply references), 'first' (reply on first message only, default), 'all' (reply on every chunk)",
+        "prompt": "Discord reply mode (off/first/all)",
         "url": None,
         "password": False,
         "category": "messaging",
@@ -1421,10 +1458,26 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
                         "Add the API endpoint URL, e.g.: base_url: https://api.example.com/v1",
                     ))
 
-    # ── fallback_model must be a top-level dict with provider + model ────
+    # ── fallback_model: legacy single-entry fallback or legacy chain list ───
     fb = config.get("fallback_model")
     if fb is not None:
-        if not isinstance(fb, dict):
+        if isinstance(fb, list):
+            valid_entries = [
+                entry for entry in fb
+                if isinstance(entry, dict) and entry.get("provider") and entry.get("model")
+            ]
+            issues.append(ConfigIssue(
+                "warning",
+                "fallback_model is using the legacy list-based chain format",
+                "Move the list to fallback_providers: [...] or run 'hermes doctor --fix' to migrate it automatically",
+            ))
+            if not valid_entries and fb:
+                issues.append(ConfigIssue(
+                    "warning",
+                    "fallback_model list has no valid fallback entries",
+                    "Each list item should be a dict with at least: provider, model",
+                ))
+        elif not isinstance(fb, dict):
             issues.append(ConfigIssue(
                 "error",
                 f"fallback_model should be a dict with 'provider' and 'model', got {type(fb).__name__}",
@@ -1446,6 +1499,39 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
                     "fallback_model is missing 'model' field — fallback will be disabled",
                     "Add: model: anthropic/claude-sonnet-4 (or another model)",
                 ))
+
+    fb_chain = config.get("fallback_providers")
+    if fb_chain is not None:
+        if not isinstance(fb_chain, list):
+            issues.append(ConfigIssue(
+                "error",
+                f"fallback_providers should be a list of provider dicts, got {type(fb_chain).__name__}",
+                "Change to:\n"
+                "  fallback_providers:\n"
+                "    - provider: openrouter\n"
+                "      model: anthropic/claude-sonnet-4",
+            ))
+        else:
+            for i, entry in enumerate(fb_chain):
+                if not isinstance(entry, dict):
+                    issues.append(ConfigIssue(
+                        "warning",
+                        f"fallback_providers[{i}] is not a dict (got {type(entry).__name__})",
+                        "Each fallback entry should have at least: provider, model",
+                    ))
+                    continue
+                if not entry.get("provider"):
+                    issues.append(ConfigIssue(
+                        "warning",
+                        f"fallback_providers[{i}] is missing 'provider' field",
+                        "Add: provider: openrouter (or another provider)",
+                    ))
+                if not entry.get("model"):
+                    issues.append(ConfigIssue(
+                        "warning",
+                        f"fallback_providers[{i}] is missing 'model' field",
+                        "Add: model: anthropic/claude-sonnet-4 (or another model)",
+                    ))
 
     # ── Check for fallback_model accidentally nested inside custom_providers ──
     if isinstance(cp, dict) and "fallback_model" not in config and "fallback_model" in (cp or {}):
@@ -1642,6 +1728,34 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
                     for key in list(providers_dict.keys())[-migrated_count:]:
                         ep = providers_dict[key]
                         print(f"    → {key}: {ep.get('api', '')}")
+
+    # ── Version 12 → 13: migrate legacy fallback_model list → fallback_providers ──
+    if current_ver < 13:
+        config = load_config()
+        legacy_fb = config.get("fallback_model")
+        current_chain = config.get("fallback_providers")
+        if isinstance(legacy_fb, list):
+            normalized_chain = [
+                entry for entry in legacy_fb
+                if isinstance(entry, dict) and entry.get("provider") and entry.get("model")
+            ]
+            changed = False
+            if normalized_chain and not current_chain:
+                config["fallback_providers"] = normalized_chain
+                results["config_added"].append(
+                    f"fallback_providers ({len(normalized_chain)} entr{'y' if len(normalized_chain) == 1 else 'ies'}) migrated from fallback_model"
+                )
+                changed = True
+            if "fallback_model" in config:
+                del config["fallback_model"]
+                changed = True
+            if changed:
+                save_config(config)
+                if not quiet:
+                    if normalized_chain and not current_chain:
+                        print(f"  ✓ Migrated legacy fallback_model chain to fallback_providers ({len(normalized_chain)} entries)")
+                    else:
+                        print("  ✓ Removed legacy list-based fallback_model entry")
 
     if current_ver < latest_ver and not quiet:
         print(f"Config version: {current_ver} → {latest_ver}")
@@ -1960,9 +2074,9 @@ _FALLBACK_COMMENT = """
 #
 # For custom OpenAI-compatible endpoints, add base_url and api_key_env.
 #
-# fallback_model:
-#   provider: openrouter
-#   model: anthropic/claude-sonnet-4
+# fallback_providers:
+#   - provider: openrouter
+#     model: anthropic/claude-sonnet-4
 #
 # ── Smart Model Routing ────────────────────────────────────────────────
 # Optional cheap-vs-strong routing for simple turns.
@@ -2003,9 +2117,9 @@ _COMMENTED_SECTIONS = """
 #
 # For custom OpenAI-compatible endpoints, add base_url and api_key_env.
 #
-# fallback_model:
-#   provider: openrouter
-#   model: anthropic/claude-sonnet-4
+# fallback_providers:
+#   - provider: openrouter
+#     model: anthropic/claude-sonnet-4
 #
 # ── Smart Model Routing ────────────────────────────────────────────────
 # Optional cheap-vs-strong routing for simple turns.
@@ -2039,8 +2153,7 @@ def save_config(config: Dict[str, Any]):
     sec = normalized.get("security", {})
     if not sec or sec.get("redact_secrets") is None:
         parts.append(_SECURITY_COMMENT)
-    fb = normalized.get("fallback_model", {})
-    # fallback_model can be a dict (single) or list (chain) — handle both
+    fb = normalized.get("fallback_providers") or normalized.get("fallback_model", {})
     if isinstance(fb, list):
         fb_configured = any(f.get("provider") and f.get("model") for f in fb if isinstance(f, dict))
     else:
