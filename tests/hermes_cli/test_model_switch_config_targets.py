@@ -66,7 +66,7 @@ class TestConfiguredModelTargets:
                         "name": "darkstar",
                         "provider": "custom",
                         "model": "darkstar",
-                        "base_url": "http://darkstar:11434/v1",
+                        "base_url": "http://192.168.1.105:8080/v1",
                     },
                 ],
             },
@@ -79,14 +79,14 @@ class TestConfiguredModelTargets:
         assert aliases["local-qwen"].source == "model_aliases"
         assert aliases["gpt-5.4"].provider == "copilot"
         assert aliases["gpt-5.4"].source == "fallback_providers"
-        assert aliases["darkstar"].base_url == "http://darkstar:11434/v1"
+        assert aliases["darkstar"].base_url == "http://192.168.1.105:8080/v1"
 
     def test_switch_model_uses_fallback_entry_and_suppresses_unreachable_warning(self, monkeypatch):
         configured = ConfiguredModelTarget(
             alias="darkstar",
             model="darkstar",
             provider="custom",
-            base_url="http://darkstar:11434/v1",
+            base_url="http://192.168.1.105:8080/v1",
             source="fallback_providers",
         )
         monkeypatch.setattr(ms, "CONFIGURED_MODEL_TARGETS", [configured])
@@ -115,7 +115,7 @@ class TestConfiguredModelTargets:
         assert result.success
         assert result.target_provider == "custom"
         assert result.new_model == "darkstar"
-        assert result.base_url == "http://darkstar:11434/v1"
+        assert result.base_url == "http://192.168.1.105:8080/v1"
         assert result.api_key == "no-key-required"
         assert result.warning_message == ""
 
