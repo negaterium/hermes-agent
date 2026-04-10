@@ -1874,7 +1874,22 @@ class HermesCLI:
                     access_token=self.api_key if self.api_key else None,
                 )
                 if available:
-                    fallback_model = available[0]
+                    preferred = [
+                        current_model,
+                        "gpt-5.4",
+                        "gpt-5.4-mini",
+                        "gpt-5.3-codex",
+                        "gpt-5.2-codex",
+                        "gpt-5.1-codex-max",
+                        "gpt-5.1-codex-mini",
+                    ]
+                    for candidate in preferred:
+                        candidate = (candidate or "").strip()
+                        if candidate and candidate in available:
+                            fallback_model = candidate
+                            break
+                    else:
+                        fallback_model = available[0]
             except Exception:
                 pass
 
@@ -3895,6 +3910,9 @@ class HermesCLI:
         if result.api_mode:
             self.api_mode = result.api_mode
 
+        # An explicit /model choice is user intent, not the implicit startup default.
+        self._model_is_default = False
+
         # Apply to running agent (in-place swap)
         if self.agent is not None:
             try:
@@ -4634,6 +4652,8 @@ class HermesCLI:
             self._manual_compress()
         elif canonical == "usage":
             self._show_usage()
+        elif canonical == "quota":
+            self._show_quota(cmd_original)
         elif canonical == "insights":
             self._show_insights(cmd_original)
         elif canonical == "paste":
@@ -5474,8 +5494,10 @@ class HermesCLI:
         compressions = compressor.compression_count
 
         msg_count = len(self.conversation_history)
+        runtime_model = getattr(agent, "model", None) or self.model or "unknown"
+        selected_model = self.model or runtime_model
         cost_result = estimate_usage_cost(
-            agent.model,
+            runtime_model,
             CanonicalUsage(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
@@ -5489,7 +5511,9 @@ class HermesCLI:
 
         print("  📊 Session Token Usage")
         print(f"  {'─' * 40}")
-        print(f"  Model:                     {agent.model}")
+        print(f"  Model:                     {runtime_model}")
+        if selected_model != runtime_model:
+            print(f"  Selected model:            {selected_model}")
         print(f"  Input tokens:              {input_tokens:>10,}")
         print(f"  Cache read tokens:         {cache_read_tokens:>10,}")
         print(f"  Cache write tokens:        {cache_write_tokens:>10,}")
@@ -5556,6 +5580,56 @@ class HermesCLI:
             db.close()
         except Exception as e:
             print(f"  Error generating insights: {e}")
+
+    def _show_quota(self, command: str = "/quota"):
+        """Show current session consumption and rolling provider usage."""
+        parts = command.split()
+        days = 7
+        source = None
+        i = 1
+        while i < len(parts):
+            if parts[i] == "--days" and i + 1 < len(parts):
+                try:
+                    days = int(parts[i + 1])
+                except ValueError:
+                    print(f"  Invalid --days value: {parts[i + 1]}")
+                    return
+                i += 2
+            elif parts[i] == "--source" and i + 1 < len(parts):
+                source = parts[i + 1]
+                i += 2
+            else:
+                i += 1
+
+        try:
+            from hermes_state import SessionDB
+            from agent.insights import InsightsEngine
+
+            db = SessionDB()
+            engine = InsightsEngine(db)
+            current_usage = None
+            if self.agent:
+                current_usage = {
+                    "model": getattr(self.agent, "model", None),
+                    "input_tokens": getattr(self.agent, "session_input_tokens", 0) or 0,
+                    "output_tokens": getattr(self.agent, "session_output_tokens", 0) or 0,
+                    "cache_read_tokens": getattr(self.agent, "session_cache_read_tokens", 0) or 0,
+                    "cache_write_tokens": getattr(self.agent, "session_cache_write_tokens", 0) or 0,
+                    "actual_cost_usd": getattr(self.agent, "session_actual_cost_usd", 0.0) or 0.0,
+                    "billing_provider": getattr(self.agent, "provider", None),
+                    "billing_base_url": getattr(self.agent, "base_url", None),
+                }
+            report = engine.generate_quota(
+                days=days,
+                source=source,
+                provider=getattr(self.agent, "provider", None) if self.agent else None,
+                base_url=getattr(self.agent, "base_url", None) if self.agent else None,
+                current_usage=current_usage,
+            )
+            print(engine.format_quota_terminal(report))
+            db.close()
+        except Exception as e:
+            print(f"  Error generating quota report: {e}")
 
     def _check_config_mcp_changes(self) -> None:
         """Detect mcp_servers changes in config.yaml and auto-reload MCP connections.

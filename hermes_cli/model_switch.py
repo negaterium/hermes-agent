@@ -560,9 +560,13 @@ def _should_suppress_validation_warning(
     try:
         from hermes_cli.models import provider_model_ids
 
+        requested = model_name.strip().lower()
+        requested_short = requested.rsplit("/", 1)[-1]
         known_models = provider_model_ids(target_provider)
-        if any(model_name.lower() == str(mid).lower() for mid in known_models):
-            return True
+        for mid in known_models:
+            known = str(mid).strip().lower()
+            if requested == known or requested_short == known.rsplit("/", 1)[-1]:
+                return True
     except Exception:
         pass
 

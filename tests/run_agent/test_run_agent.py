@@ -1831,7 +1831,7 @@ class TestRunConversation:
         # Should have a user-friendly response (not None)
         assert result["final_response"] is not None
         assert "Thinking Budget Exhausted" in result["final_response"]
-        assert "/thinkon" in result["final_response"]
+        assert "/reasoning" in result["final_response"]
 
     def test_length_empty_content_detected_as_thinking_exhausted(self, agent):
         """When finish_reason='length' and content is None/empty, detect exhaustion."""

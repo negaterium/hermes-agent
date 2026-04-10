@@ -251,6 +251,27 @@ class TestCLIUsageReport:
         assert "n/a" in output
         assert "Pricing unknown for local/my-custom-model" in output
 
+    def test_show_usage_shows_selected_model_when_runtime_differs(self, capsys):
+        cli_obj = _attach_agent(
+            _make_cli(model="qwen3.5:9b"),
+            prompt_tokens=1_000,
+            completion_tokens=500,
+            total_tokens=1_500,
+            api_calls=1,
+            context_tokens=1_000,
+            context_length=32_000,
+        )
+        cli_obj.agent.model = "gpt-5.4-mini"
+        cli_obj.verbose = False
+
+        cli_obj._show_usage()
+        output = capsys.readouterr().out
+
+        assert "Model:" in output
+        assert "gpt-5.4-mini" in output
+        assert "Selected model:" in output
+        assert "qwen3.5:9b" in output
+
     def test_zero_priced_provider_models_stay_unknown(self, capsys):
         cli_obj = _attach_agent(
             _make_cli(model="glm-5"),

@@ -1520,6 +1520,32 @@ class AIAgent:
             return {"max_completion_tokens": value}
         return {"max_tokens": value}
 
+    def _default_completion_budget(self) -> int | None:
+        """Return a safe default output budget when the caller didn't set one.
+
+        Some local reasoning models served through OpenAI-compatible endpoints
+        spend a noticeable chunk of the output budget on hidden reasoning before
+        emitting visible text or tool calls. Very small implicit defaults can
+        therefore produce empty content with finish_reason='length'.
+
+        We only override the provider default for known local custom models that
+        exhibit this behavior in practice. Budget is modest for normal text and
+        larger for tool-calling turns.
+        """
+        provider_lower = (self.provider or "").strip().lower()
+        model_lower = (self.model or "").strip().lower()
+        if provider_lower != "custom":
+            return None
+
+        if model_lower in {"darkstar", "glm-flash"}:
+            # Local llama.cpp routes can burn a large chunk of output budget on
+            # hidden reasoning before emitting visible text or tool calls.
+            # Keep a generous floor so we don't repeatedly hit
+            # finish_reason='length' with empty content.
+            return 8192 if self.tools else 4096
+
+        return None
+
     def _has_content_after_think_block(self, content: str) -> bool:
         """
         Check if content has actual text after any reasoning/thinking blocks.
@@ -5516,20 +5542,24 @@ class AIAgent:
         if self.max_tokens is not None:
             if not self._is_qwen_portal():
                 api_kwargs.update(self._max_tokens_param(self.max_tokens))
-        elif self._is_openrouter_url() and "claude" in (self.model or "").lower():
-            # OpenRouter translates requests to Anthropic's Messages API,
-            # which requires max_tokens as a mandatory field.  When we omit
-            # it, OpenRouter picks a default that can be too low — the model
-            # spends its output budget on thinking and has almost nothing
-            # left for the actual response (especially large tool calls like
-            # write_file).  Sending the model's real output limit ensures
-            # full capacity.  Other providers handle the default fine.
-            try:
-                from agent.anthropic_adapter import _get_anthropic_max_output
-                _model_output_limit = _get_anthropic_max_output(self.model)
-                api_kwargs["max_tokens"] = _model_output_limit
-            except Exception:
-                pass  # fail open — let OpenRouter pick its default
+        else:
+            _default_budget = self._default_completion_budget()
+            if _default_budget is not None and not self._is_qwen_portal():
+                api_kwargs.update(self._max_tokens_param(_default_budget))
+            elif self._is_openrouter_url() and "claude" in (self.model or "").lower():
+                # OpenRouter translates requests to Anthropic's Messages API,
+                # which requires max_tokens as a mandatory field.  When we omit
+                # it, OpenRouter picks a default that can be too low — the model
+                # spends its output budget on thinking and has almost nothing
+                # left for the actual response (especially large tool calls like
+                # write_file).  Sending the model's real output limit ensures
+                # full capacity.  Other providers handle the default fine.
+                try:
+                    from agent.anthropic_adapter import _get_anthropic_max_output
+                    _model_output_limit = _get_anthropic_max_output(self.model)
+                    api_kwargs["max_tokens"] = _model_output_limit
+                except Exception:
+                    pass  # fail open — let provider pick its default
 
         extra_body = {}
 
@@ -7750,9 +7780,9 @@ class AIAgent:
                                 "The model used all its output tokens on reasoning "
                                 "and had none left for the actual response.\n\n"
                                 "To fix this:\n"
-                                "→ Lower reasoning effort: `/thinkon low` or `/thinkon minimal`\n"
-                                "→ Increase the output token limit: "
-                                "set `model.max_tokens` in config.yaml"
+                                "→ Lower reasoning effort: `/reasoning low` or `/reasoning minimal`\n"
+                                "→ Increase output token budget for this route/model "
+                                "(or set a higher `max_tokens` in your provider config)"
                             )
                             self._cleanup_task_resources(effective_task_id)
                             self._persist_session(messages, conversation_history)

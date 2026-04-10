@@ -3,7 +3,7 @@ import os
 import sys
 from unittest.mock import patch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from hermes_cli.codex_models import DEFAULT_CODEX_MODELS, get_codex_model_ids
 
@@ -231,8 +231,8 @@ class TestNormalizeModelForProvider:
         ):
             changed = cli._normalize_model_for_provider("openai-codex")
         assert changed is True
-        # Uses first from available list
-        assert cli.model == "gpt-5.3-codex"
+        # Prefer gpt-5.4 over older codex slugs when both are available.
+        assert cli.model == "gpt-5.4"
 
     def test_default_fallback_when_api_fails(self):
         """No model configured falls back to gpt-5.3-codex when API unreachable."""
@@ -262,3 +262,33 @@ class TestNormalizeModelForProvider:
             changed = cli._normalize_model_for_provider("openai-codex")
         assert changed is True
         assert cli.model == "gpt-5.3-codex"
+
+    def test_default_copilot_fallback_prefers_gpt_54_over_mini(self):
+        """When default Codex routing has both, gpt-5.4 should beat gpt-5.4-mini."""
+        import cli as _cli_mod
+        _clean_config = {
+            "model": {
+                "default": "",
+                "base_url": "",
+                "provider": "auto",
+            },
+            "display": {"compact": False, "tool_progress": "all", "resume_display": "full"},
+            "agent": {},
+            "terminal": {"env_type": "local"},
+        }
+        with (
+            patch("cli.get_tool_definitions", return_value=[]),
+            patch.dict("os.environ", {"LLM_MODEL": "", "HERMES_MAX_ITERATIONS": ""}, clear=False),
+            patch.dict(_cli_mod.__dict__, {"CLI_CONFIG": _clean_config}),
+        ):
+            from cli import HermesCLI
+            cli = HermesCLI(model="gpt-5.4")
+
+        cli._model_is_default = True
+        with patch(
+            "hermes_cli.codex_models.get_codex_model_ids",
+            return_value=["gpt-5.4-mini", "gpt-5.4"],
+        ):
+            changed = cli._normalize_model_for_provider("openai-codex")
+        assert changed is False
+        assert cli.model == "gpt-5.4"

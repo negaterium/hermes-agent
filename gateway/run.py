@@ -5325,13 +5325,21 @@ class GatewayRunner:
 
         agent = self._running_agents.get(session_key)
         if agent and hasattr(agent, "session_total_tokens") and agent.session_api_calls > 0:
+            override = getattr(self, "_session_model_overrides", {}).get(session_key, {})
+            runtime_model = getattr(agent, "model", None) or override.get("model") or "unknown"
+            selected_model = override.get("model") or runtime_model
             lines = [
                 "📊 **Session Token Usage**",
+                f"Model: {runtime_model}",
+            ]
+            if selected_model != runtime_model:
+                lines.append(f"Selected model: {selected_model}")
+            lines.extend([
                 f"Prompt (input): {agent.session_prompt_tokens:,}",
                 f"Completion (output): {agent.session_completion_tokens:,}",
                 f"Total: {agent.session_total_tokens:,}",
                 f"API calls: {agent.session_api_calls}",
-            ]
+            ])
             ctx = agent.context_compressor
             if ctx.last_prompt_tokens:
                 pct = min(100, ctx.last_prompt_tokens / ctx.context_length * 100) if ctx.context_length else 0

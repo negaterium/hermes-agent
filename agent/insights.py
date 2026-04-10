@@ -20,7 +20,7 @@ import json
 import time
 from collections import Counter, defaultdict
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from agent.usage_pricing import (
     CanonicalUsage,
@@ -169,6 +169,146 @@ class InsightsEngine:
             "activity": activity,
             "top_sessions": top_sessions,
         }
+
+    def generate_quota(
+        self,
+        *,
+        days: int = 7,
+        source: str = None,
+        provider: Optional[str] = None,
+        base_url: Optional[str] = None,
+        current_usage: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Generate a current-session and rolling-provider usage summary.
+
+        The Hermes codebase does not have authoritative provider quota APIs for
+        all providers. This report therefore shows local consumption:
+        - the active session's usage when available
+        - the selected provider's usage over the last ``days`` days
+        - a clearly labeled note when no hard quota is exposed
+        """
+        cutoff = time.time() - (days * 86400)
+        sessions = self._get_sessions(cutoff, source)
+
+        current = self._summarize_current_usage(current_usage, provider=provider, base_url=base_url)
+        if provider is None:
+            provider = current.get("billing_provider") or current.get("provider") or ""
+        if base_url is None:
+            base_url = current.get("billing_base_url") or ""
+
+        weekly_sessions = [
+            s for s in sessions
+            if self._session_matches_provider(s, provider=provider, base_url=base_url)
+        ]
+        weekly_summary = self._summarize_sessions(weekly_sessions)
+
+        return {
+            "days": days,
+            "source_filter": source,
+            "provider": provider or "unknown",
+            "base_url": base_url or "",
+            "current": current,
+            "weekly": weekly_summary,
+            "quota": {
+                "known": False,
+                "limit": None,
+                "used": None,
+                "remaining": None,
+                "resets_at": None,
+                "note": (
+                    "Hermes does not have direct access to most provider dashboards. "
+                    "These are local usage totals, not an authoritative provider quota."
+                ),
+            },
+        }
+
+    @staticmethod
+    def _session_matches_provider(session: Dict[str, Any], *, provider: Optional[str], base_url: Optional[str]) -> bool:
+        """Return True when a session belongs to the selected provider endpoint."""
+        if provider:
+            session_provider = str(session.get("billing_provider") or "").strip().lower()
+            if session_provider != provider.strip().lower():
+                return False
+        if base_url:
+            session_base = str(session.get("billing_base_url") or "").strip().rstrip("/")
+            if session_base != base_url.strip().rstrip("/"):
+                return False
+        return True
+
+    @staticmethod
+    def _summarize_sessions(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        total_input = sum(s.get("input_tokens") or 0 for s in sessions)
+        total_output = sum(s.get("output_tokens") or 0 for s in sessions)
+        total_cache_read = sum(s.get("cache_read_tokens") or 0 for s in sessions)
+        total_cache_write = sum(s.get("cache_write_tokens") or 0 for s in sessions)
+        total_tokens = total_input + total_output + total_cache_read + total_cache_write
+        estimated_cost = 0.0
+        actual_cost = 0.0
+        for s in sessions:
+            estimate, _status = _estimate_cost(s)
+            estimated_cost += estimate
+            actual_cost += s.get("actual_cost_usd") or 0.0
+
+        latest_started = max((s.get("started_at") or 0 for s in sessions), default=None)
+        earliest_started = min((s.get("started_at") or 0 for s in sessions), default=None)
+
+        return {
+            "sessions": len(sessions),
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "cache_read_tokens": total_cache_read,
+            "cache_write_tokens": total_cache_write,
+            "total_tokens": total_tokens,
+            "estimated_cost": estimated_cost,
+            "actual_cost": actual_cost,
+            "latest_started_at": latest_started,
+            "earliest_started_at": earliest_started,
+        }
+
+    @staticmethod
+    def _summarize_current_usage(current_usage: Optional[Dict[str, Any]], *, provider: Optional[str], base_url: Optional[str]) -> Dict[str, Any]:
+        if not current_usage:
+            return {
+                "sessions": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "total_tokens": 0,
+                "estimated_cost": 0.0,
+                "actual_cost": 0.0,
+                "billing_provider": provider or "",
+                "billing_base_url": base_url or "",
+                "billing_mode": "unknown",
+            }
+
+        data = dict(current_usage)
+        data.setdefault("billing_provider", provider or data.get("billing_provider") or "")
+        data.setdefault("billing_base_url", base_url or data.get("billing_base_url") or "")
+        data.setdefault("billing_mode", data.get("billing_mode") or "unknown")
+
+        usage = CanonicalUsage(
+            input_tokens=data.get("input_tokens") or 0,
+            output_tokens=data.get("output_tokens") or 0,
+            cache_read_tokens=data.get("cache_read_tokens") or 0,
+            cache_write_tokens=data.get("cache_write_tokens") or 0,
+        )
+        estimate = estimate_usage_cost(
+            data.get("model") or "",
+            usage,
+            provider=data.get("billing_provider") or provider,
+            base_url=data.get("billing_base_url") or base_url,
+        )
+        data["sessions"] = 1
+        data["estimated_cost"] = float(estimate.amount_usd or 0.0)
+        data["actual_cost"] = float(data.get("actual_cost_usd") or 0.0)
+        data["total_tokens"] = (
+            (data.get("input_tokens") or 0)
+            + (data.get("output_tokens") or 0)
+            + (data.get("cache_read_tokens") or 0)
+            + (data.get("cache_write_tokens") or 0)
+        )
+        return data
 
     # =========================================================================
     # Data gathering (SQL queries)
@@ -792,8 +932,89 @@ class InsightsEngine:
             display_hr = hr % 12 or 12
             lines.append(f"**📅 Busiest:** {act['busiest_day']['day']}s ({act['busiest_day']['count']} sessions), {display_hr}{ampm} ({act['busiest_hour']['count']} sessions)")
             if act.get("active_days"):
-                lines.append(f"**Active days:** {act['active_days']}", )
+                lines.append(f"**Active days:** {act['active_days']}")
             if act.get("max_streak", 0) > 1:
                 lines.append(f"**Best streak:** {act['max_streak']} consecutive days")
 
+        return "\n".join(lines)
+
+    def format_quota_terminal(self, report: Dict) -> str:
+        """Format a current-session + rolling provider usage report for the CLI."""
+        lines: List[str] = []
+        provider = report.get("provider") or "unknown"
+        base_url = report.get("base_url") or ""
+        days = report.get("days", 7)
+        current = report.get("current") or {}
+        weekly = report.get("weekly") or {}
+        quota = report.get("quota") or {}
+
+        lines.append("  ◆ Usage / quota")
+        lines.append(f"  Provider: {provider}{f' @ {base_url}' if base_url else ''}")
+        lines.append(f"  Window: last {days} days")
+        lines.append("")
+
+        if current.get("sessions", 0) > 0:
+            lines.append("  Current session")
+            lines.append(f"    Input tokens:   {current.get('input_tokens', 0):>10,}")
+            lines.append(f"    Output tokens:  {current.get('output_tokens', 0):>10,}")
+            lines.append(f"    Cache read:     {current.get('cache_read_tokens', 0):>10,}")
+            lines.append(f"    Cache write:    {current.get('cache_write_tokens', 0):>10,}")
+            lines.append(f"    Total tokens:   {current.get('total_tokens', 0):>10,}")
+            if current.get("estimated_cost") is not None:
+                lines.append(f"    Est. cost:      ${float(current.get('estimated_cost') or 0.0):>10.4f}")
+            lines.append("")
+        else:
+            lines.append("  Current session: no active usage snapshot")
+            lines.append("")
+
+        lines.append("  Weekly provider usage")
+        lines.append(f"    Sessions:       {weekly.get('sessions', 0):>10,}")
+        lines.append(f"    Input tokens:   {weekly.get('input_tokens', 0):>10,}")
+        lines.append(f"    Output tokens:  {weekly.get('output_tokens', 0):>10,}")
+        lines.append(f"    Cache read:     {weekly.get('cache_read_tokens', 0):>10,}")
+        lines.append(f"    Cache write:    {weekly.get('cache_write_tokens', 0):>10,}")
+        lines.append(f"    Total tokens:   {weekly.get('total_tokens', 0):>10,}")
+        lines.append(f"    Est. cost:      ${float(weekly.get('estimated_cost') or 0.0):>10.4f}")
+        if weekly.get('actual_cost'):
+            lines.append(f"    Actual cost:    ${float(weekly.get('actual_cost') or 0.0):>10.4f}")
+        lines.append("")
+
+        lines.append("  Quota")
+        if quota.get("known"):
+            lines.append(f"    Used:           {quota.get('used')}")
+            lines.append(f"    Remaining:      {quota.get('remaining')}")
+            if quota.get("resets_at"):
+                lines.append(f"    Resets at:      {quota.get('resets_at')}")
+        else:
+            lines.append("    Provider quota not exposed")
+            lines.append(f"    {quota.get('note')}")
+
+        return "\n".join(lines)
+
+    def format_quota_gateway(self, report: Dict) -> str:
+        """Format quota/usage for gateway and chat surfaces."""
+        provider = report.get("provider") or "unknown"
+        base_url = report.get("base_url") or ""
+        days = report.get("days", 7)
+        current = report.get("current") or {}
+        weekly = report.get("weekly") or {}
+        quota = report.get("quota") or {}
+
+        lines = [f"📊 **Hermes Usage** — {provider}{f' @ {base_url}' if base_url else ''}"]
+        lines.append("")
+        if current.get("sessions", 0) > 0:
+            lines.append(
+                f"**Current session:** {current.get('total_tokens', 0):,} tokens "
+                f"(in: {current.get('input_tokens', 0):,} / out: {current.get('output_tokens', 0):,})"
+            )
+        else:
+            lines.append("**Current session:** no active usage snapshot")
+        lines.append(
+            f"**Last {days} days:** {weekly.get('total_tokens', 0):,} tokens across {weekly.get('sessions', 0):,} sessions"
+        )
+        lines.append(f"**Est. cost:** ${float(weekly.get('estimated_cost') or 0.0):.2f}")
+        if quota.get("known"):
+            lines.append(f"**Quota:** used {quota.get('used')} / {quota.get('limit')} — remaining {quota.get('remaining')}")
+        else:
+            lines.append("**Quota:** not exposed by provider")
         return "\n".join(lines)
