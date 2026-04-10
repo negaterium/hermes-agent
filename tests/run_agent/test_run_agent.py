@@ -203,6 +203,61 @@ class TestHasContentAfterThinkBlock:
     def test_none_returns_false(self, agent):
         assert agent._has_content_after_think_block(None) is False
 
+
+class TestSwitchModel:
+    def test_switch_model_clears_stale_endpoint_state_when_new_runtime_has_none(self, monkeypatch):
+        agent = AIAgent.__new__(AIAgent)
+        agent.model = "old-model"
+        agent.provider = "custom"
+        agent.base_url = "http://old-endpoint/v1"
+        agent.api_key = "old-secret"
+        agent.api_mode = "openai_compat"
+        agent.client = MagicMock()
+        agent._client_kwargs = {}
+        agent._anthropic_client = None
+        agent._anthropic_api_key = ""
+        agent._anthropic_base_url = None
+        agent._is_anthropic_oauth = False
+        agent._cached_system_prompt = "cached"
+        agent._fallback_activated = True
+        agent._fallback_index = 9
+        agent._use_prompt_caching = False
+        agent.context_compressor = SimpleNamespace(
+            model="old-model",
+            base_url="http://old-endpoint/v1",
+            api_key="old-secret",
+            provider="custom",
+            context_length=4096,
+            threshold_percent=0.5,
+            threshold_tokens=2048,
+        )
+        agent._primary_runtime = {}
+
+        monkeypatch.setattr(agent, "_create_openai_client", MagicMock(return_value=MagicMock()))
+        monkeypatch.setattr("agent.model_metadata.get_model_context_length", lambda *a, **kw: 8192)
+
+        agent.switch_model(
+            new_model="new-model",
+            new_provider="openrouter",
+            api_key="",
+            base_url="",
+            api_mode="chat_completions",
+        )
+
+        assert agent.model == "new-model"
+        assert agent.provider == "openrouter"
+        assert agent.base_url == ""
+        assert agent._base_url_lower == ""
+        assert agent.api_key == ""
+        assert agent._client_kwargs == {"api_key": "", "base_url": ""}
+        assert agent.context_compressor.model == "new-model"
+        assert agent.context_compressor.base_url == ""
+        assert agent.context_compressor.api_key == ""
+        assert agent.context_compressor.provider == "openrouter"
+        assert agent._fallback_activated is False
+        assert agent._fallback_index == 0
+        assert agent._cached_system_prompt is None
+
     def test_empty_returns_false(self, agent):
         assert agent._has_content_after_think_block("") is False
 

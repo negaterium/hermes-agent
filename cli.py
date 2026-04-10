@@ -3901,12 +3901,10 @@ class HermesCLI:
         self.model = result.new_model
         self.provider = result.target_provider
         self.requested_provider = result.target_provider
-        if result.api_key:
-            self.api_key = result.api_key
-            self._explicit_api_key = result.api_key
-        if result.base_url:
-            self.base_url = result.base_url
-            self._explicit_base_url = result.base_url
+        self.api_key = result.api_key or ""
+        self._explicit_api_key = result.api_key or None
+        self.base_url = result.base_url or ""
+        self._explicit_base_url = result.base_url or None
         if result.api_mode:
             self.api_mode = result.api_mode
 
@@ -3930,9 +3928,9 @@ class HermesCLI:
         # knows a switch occurred (avoids injecting system messages mid-history
         # which breaks providers and prompt caching).
         self._pending_model_switch_note = (
-            f"[Note: model was just switched from {old_model} to {result.new_model} "
-            f"via {result.provider_label or result.target_provider}. "
-            f"Adjust your self-identification accordingly.]"
+            f"[Model switch: {old_model} → {result.new_model} via "
+            f"{result.provider_label or result.target_provider}. "
+            f"Treat {result.new_model} as the active runtime model for this conversation.]"
         )
 
         # Display confirmation with full metadata
@@ -3981,6 +3979,8 @@ class HermesCLI:
             save_config_value("model.default", result.new_model)
             if result.provider_changed:
                 save_config_value("model.provider", result.target_provider)
+            save_config_value("model.base_url", result.base_url or None)
+            save_config_value("model.api_key", result.api_key or None)
             _cprint("    Saved to config.yaml (--global)")
         else:
             _cprint("    (session only — add --global to persist)")

@@ -1327,10 +1327,9 @@ class AIAgent:
         # ── Swap core runtime fields ──
         self.model = new_model
         self.provider = new_provider
-        self.base_url = base_url or self.base_url
+        self.base_url = base_url or ""
         self.api_mode = api_mode
-        if api_key:
-            self.api_key = api_key
+        self.api_key = api_key or ""
 
         # ── Build new client ──
         if api_mode == "anthropic_messages":
