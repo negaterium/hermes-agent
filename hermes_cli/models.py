@@ -530,15 +530,93 @@ _PROVIDER_ALIASES = {
 }
 
 
-def model_ids() -> list[str]:
+def get_default_model_for_provider(provider: str) -> str:
+    """Return the default model for a provider, or empty string if unknown.
+
+    Uses the first entry in _PROVIDER_MODELS as the default.  This is the
+    model a user would be offered first in the ``hermes model`` picker.
+
+    Used as a fallback when the user has configured a provider but never
+    selected a model (e.g. ``hermes auth add openai-codex`` without
+    ``hermes model``).
+    """
+    models = _PROVIDER_MODELS.get(provider, [])
+    return models[0] if models else ""
+
+
+def _openrouter_model_is_free(pricing: Any) -> bool:
+    """Return True when both prompt and completion pricing are zero."""
+    if not isinstance(pricing, dict):
+        return False
+    try:
+        return float(pricing.get("prompt", "0")) == 0 and float(pricing.get("completion", "0")) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def fetch_openrouter_models(
+    timeout: float = 8.0,
+    *,
+    force_refresh: bool = False,
+) -> list[tuple[str, str]]:
+    """Return the curated OpenRouter picker list, refreshed from the live catalog when possible."""
+    global _openrouter_catalog_cache
+
+    if _openrouter_catalog_cache is not None and not force_refresh:
+        return list(_openrouter_catalog_cache)
+
+    fallback = list(OPENROUTER_MODELS)
+    preferred_ids = [mid for mid, _ in fallback]
+
+    try:
+        req = urllib.request.Request(
+            "https://openrouter.ai/api/v1/models",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode())
+    except Exception:
+        return list(_openrouter_catalog_cache or fallback)
+
+    live_items = payload.get("data", [])
+    if not isinstance(live_items, list):
+        return list(_openrouter_catalog_cache or fallback)
+
+    live_by_id: dict[str, dict[str, Any]] = {}
+    for item in live_items:
+        if not isinstance(item, dict):
+            continue
+        mid = str(item.get("id") or "").strip()
+        if not mid:
+            continue
+        live_by_id[mid] = item
+
+    curated: list[tuple[str, str]] = []
+    for preferred_id in preferred_ids:
+        live_item = live_by_id.get(preferred_id)
+        if live_item is None:
+            continue
+        desc = "free" if _openrouter_model_is_free(live_item.get("pricing")) else ""
+        curated.append((preferred_id, desc))
+
+    if not curated:
+        return list(_openrouter_catalog_cache or fallback)
+
+    first_id, _ = curated[0]
+    curated[0] = (first_id, "recommended")
+    _openrouter_catalog_cache = curated
+    return list(curated)
+
+
+def model_ids(*, force_refresh: bool = False) -> list[str]:
     """Return just the OpenRouter model-id strings."""
-    return [mid for mid, _ in OPENROUTER_MODELS]
+    return [mid for mid, _ in fetch_openrouter_models(force_refresh=force_refresh)]
 
 
-def menu_labels() -> list[str]:
+def menu_labels(*, force_refresh: bool = False) -> list[str]:
     """Return display labels like 'anthropic/claude-opus-4.6 (recommended)'."""
     labels = []
-    for mid, desc in OPENROUTER_MODELS:
+    for mid, desc in fetch_openrouter_models(force_refresh=force_refresh):
         labels.append(f"{mid} ({desc})" if desc else mid)
     return labels
 
