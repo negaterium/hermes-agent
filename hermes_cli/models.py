@@ -554,6 +554,9 @@ def _openrouter_model_is_free(pricing: Any) -> bool:
         return False
 
 
+_openrouter_catalog_cache: list[tuple[str, str]] | None = None
+
+
 def fetch_openrouter_models(
     timeout: float = 8.0,
     *,

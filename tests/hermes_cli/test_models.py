@@ -3,7 +3,7 @@
 from unittest.mock import patch, MagicMock
 
 from hermes_cli.models import (
-    OPENROUTER_MODELS, menu_labels, model_ids, detect_provider_for_model,
+    OPENROUTER_MODELS, fetch_openrouter_models, menu_labels, model_ids, detect_provider_for_model,
     filter_nous_free_models, _NOUS_ALLOWED_FREE_MODELS,
     is_nous_free_tier, partition_nous_models_by_tier,
     check_nous_free_tier, clear_nous_free_tier_cache,
@@ -11,43 +11,57 @@ from hermes_cli.models import (
 )
 import hermes_cli.models as _models_mod
 
+LIVE_OPENROUTER_MODELS = [
+    ("anthropic/claude-opus-4.6", "recommended"),
+    ("qwen/qwen3.6-plus", ""),
+    ("nvidia/nemotron-3-super-120b-a12b:free", "free"),
+]
+
 
 class TestModelIds:
     def test_returns_non_empty_list(self):
-        ids = model_ids()
+        with patch("hermes_cli.models.fetch_openrouter_models", return_value=LIVE_OPENROUTER_MODELS):
+            ids = model_ids()
         assert isinstance(ids, list)
         assert len(ids) > 0
 
-    def test_ids_match_models_list(self):
-        ids = model_ids()
-        expected = [mid for mid, _ in OPENROUTER_MODELS]
+    def test_ids_match_fetched_catalog(self):
+        with patch("hermes_cli.models.fetch_openrouter_models", return_value=LIVE_OPENROUTER_MODELS):
+            ids = model_ids()
+        expected = [mid for mid, _ in LIVE_OPENROUTER_MODELS]
         assert ids == expected
 
     def test_all_ids_contain_provider_slash(self):
         """Model IDs should follow the provider/model format."""
-        for mid in model_ids():
-            assert "/" in mid, f"Model ID '{mid}' missing provider/ prefix"
+        with patch("hermes_cli.models.fetch_openrouter_models", return_value=LIVE_OPENROUTER_MODELS):
+            for mid in model_ids():
+                assert "/" in mid, f"Model ID '{mid}' missing provider/ prefix"
 
     def test_no_duplicate_ids(self):
-        ids = model_ids()
+        with patch("hermes_cli.models.fetch_openrouter_models", return_value=LIVE_OPENROUTER_MODELS):
+            ids = model_ids()
         assert len(ids) == len(set(ids)), "Duplicate model IDs found"
 
 
 class TestMenuLabels:
     def test_same_length_as_model_ids(self):
-        assert len(menu_labels()) == len(model_ids())
+        with patch("hermes_cli.models.fetch_openrouter_models", return_value=LIVE_OPENROUTER_MODELS):
+            assert len(menu_labels()) == len(model_ids())
 
     def test_first_label_marked_recommended(self):
-        labels = menu_labels()
+        with patch("hermes_cli.models.fetch_openrouter_models", return_value=LIVE_OPENROUTER_MODELS):
+            labels = menu_labels()
         assert "recommended" in labels[0].lower()
 
     def test_each_label_contains_its_model_id(self):
-        for label, mid in zip(menu_labels(), model_ids()):
-            assert mid in label, f"Label '{label}' doesn't contain model ID '{mid}'"
+        with patch("hermes_cli.models.fetch_openrouter_models", return_value=LIVE_OPENROUTER_MODELS):
+            for label, mid in zip(menu_labels(), model_ids()):
+                assert mid in label, f"Label '{label}' doesn't contain model ID '{mid}'"
 
     def test_non_recommended_labels_have_no_tag(self):
         """Only the first model should have (recommended)."""
-        labels = menu_labels()
+        with patch("hermes_cli.models.fetch_openrouter_models", return_value=LIVE_OPENROUTER_MODELS):
+            labels = menu_labels()
         for label in labels[1:]:
             assert "recommended" not in label.lower(), f"Unexpected 'recommended' in '{label}'"
 
