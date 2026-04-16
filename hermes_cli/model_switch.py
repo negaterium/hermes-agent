@@ -408,25 +408,17 @@ def resolve_model_query(
     raw_input: str,
     current_provider: str,
 ) -> Optional[tuple[str, str, str, str, str]]:
-    """Resolve a /model query using config-backed targets and catalog fuzzy matches.
+    """Resolve config-backed /model targets before falling back to upstream logic.
 
     Returns ``(provider, model, base_url, api_key, matched_via)`` or ``None``.
-    The resolution order intentionally preserves the darkserver-specific behavior:
-
-    1. Config-backed targets in config.yaml (model.default + fallback_providers/
-       fallback_model) are trusted first.
-    2. Exact model-id match across provider catalogs.
-    3. Substring match across provider catalogs.
-    4. difflib close-match for typos.
-    5. ``None`` -> caller may fall through to pass-through / validation logic.
+    Only config-defined targets are handled here; normal alias resolution,
+    provider detection, aggregator slug handling, and catalog matching remain in
+    the main switch_model flow so upstream behavior stays intact.
     """
     q = raw_input.strip().lower()
     if not q:
         return None
 
-    # ------------------------------------------------------------------
-    # 1) Config-backed targets from config.yaml
-    # ------------------------------------------------------------------
     try:
         from hermes_cli.config import load_config
         cfg = load_config() or {}
@@ -462,61 +454,6 @@ def resolve_model_query(
                     )
     except Exception:
         pass
-
-    # ------------------------------------------------------------------
-    # 2) Static provider catalogs with fuzzy matching
-    # ------------------------------------------------------------------
-    try:
-        from hermes_cli.models import _PROVIDER_MODELS, OPENROUTER_MODELS
-        from hermes_cli.auth import PROVIDER_REGISTRY
-        import os as _os
-    except Exception:
-        return None
-
-    authed: set[str] = set()
-    try:
-        for pid, pconfig in PROVIDER_REGISTRY.items():
-            for env_var in getattr(pconfig, "api_key_env_vars", []):
-                if _os.getenv(env_var, "").strip():
-                    authed.add(pid)
-                    break
-    except Exception:
-        pass
-
-    _AGGREGATORS = {"nous", "openrouter"}
-    candidates: list[tuple[str, str, int]] = []
-    for pid, models in _PROVIDER_MODELS.items():
-        if pid in _AGGREGATORS:
-            continue
-        prio = 0 if pid in authed else 1
-        for m in models:
-            candidates.append((m, pid, prio))
-    for mid, _ in OPENROUTER_MODELS:
-        candidates.append((mid, "openrouter", 2))
-
-    candidates.sort(key=lambda x: x[2])
-    no_endpoint = ("", "")
-
-    for mid, pid, _prio in candidates:
-        mid_lower = mid.lower()
-        if q == mid_lower:
-            return (pid, mid) + no_endpoint + ("exact",)
-        if "/" in mid and q == mid.split("/", 1)[1].lower():
-            return (pid, mid) + no_endpoint + ("exact",)
-
-    substr_hits = [(mid, pid, prio) for mid, pid, prio in candidates if q in mid.lower()]
-    if substr_hits:
-        substr_hits.sort(key=lambda x: (x[2], -len(x[0])))
-        mid, pid, _prio = substr_hits[0]
-        return (pid, mid) + no_endpoint + (f"substring ({len(substr_hits)} candidates)",)
-
-    from difflib import get_close_matches
-    all_ids = [mid.lower() for mid, _pid, _prio in candidates]
-    close = get_close_matches(q, all_ids, n=1, cutoff=0.6)
-    if close:
-        for mid, pid, _prio in candidates:
-            if mid.lower() == close[0]:
-                return (pid, mid) + no_endpoint + ("close match",)
 
     return None
 

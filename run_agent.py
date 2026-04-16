@@ -5982,10 +5982,7 @@ class AIAgent:
             self.provider = fb_provider
             self.base_url = fb_base_url
             self.api_mode = fb_api_mode
-            self._fallback_index += 1
-            # Mark exhausted only when we've consumed the last chain entry
-            if self._fallback_index >= len(self._fallback_chain):
-                self._fallback_activated = True
+            self._fallback_activated = True
 
             if fb_api_mode == "anthropic_messages":
                 # Build native Anthropic client instead of using OpenAI client
