@@ -3054,6 +3054,9 @@ class GatewayRunner:
         if canonical == "model":
             return await self._handle_model_command(event)
 
+        if canonical == "models-list":
+            return await self._handle_models_list_command(event)
+
         if canonical == "provider":
             return await self._handle_provider_command(event)
         
@@ -4904,8 +4907,8 @@ class GatewayRunner:
                 model_cfg = cfg.setdefault("model", {})
                 model_cfg["default"] = result.new_model
                 model_cfg["provider"] = result.target_provider
-                if result.base_url:
-                    model_cfg["base_url"] = result.base_url
+                model_cfg["base_url"] = result.base_url or None
+                model_cfg["api_key"] = result.api_key or None
                 from hermes_cli.config import save_config
                 save_config(cfg)
             except Exception as e:
@@ -4956,6 +4959,44 @@ class GatewayRunner:
             lines.append("_(session only -- add `--global` to persist)_")
 
         return "\n".join(lines)
+
+    async def _handle_models_list_command(self, event: MessageEvent) -> str:
+        """Handle /models-list — show configured primary, fallback, and alias targets."""
+        import yaml
+        from hermes_cli.model_switch import format_configured_model_targets
+
+        current_model = ""
+        current_provider = "openrouter"
+        current_base_url = ""
+        cfg = {}
+
+        config_path = _hermes_home / "config.yaml"
+        try:
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                model_cfg = cfg.get("model", {})
+                if isinstance(model_cfg, dict):
+                    current_model = model_cfg.get("default", "")
+                    current_provider = model_cfg.get("provider", current_provider)
+                    current_base_url = model_cfg.get("base_url", "")
+        except Exception:
+            cfg = {}
+
+        source = event.source
+        session_key = self._session_key_for_source(source)
+        override = self._session_model_overrides.get(session_key, {})
+        if override:
+            current_model = override.get("model", current_model)
+            current_provider = override.get("provider", current_provider)
+            current_base_url = override.get("base_url", current_base_url)
+
+        return format_configured_model_targets(
+            current_model=current_model,
+            current_provider=current_provider,
+            current_base_url=current_base_url,
+            cfg=cfg,
+        )
 
     async def _handle_provider_command(self, event: MessageEvent) -> str:
         """Handle /provider command - show available providers."""

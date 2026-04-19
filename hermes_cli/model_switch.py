@@ -244,6 +244,25 @@ class ModelSwitchResult:
 
 
 @dataclass
+class ConfiguredModelTarget:
+    """A model target loaded from config for display in /models-list."""
+
+    name: str
+    provider: str
+    base_url: str = ""
+    source: str = ""
+
+
+@dataclass
+class ConfiguredModelTargets:
+    """Primary, fallback, and alias targets available from config.yaml."""
+
+    primary: Optional[ConfiguredModelTarget]
+    fallbacks: list[ConfiguredModelTarget]
+    aliases: list[tuple[str, ConfiguredModelTarget]]
+
+
+@dataclass
 class CustomAutoResult:
     """Result of switching to bare 'custom' provider with auto-detect."""
 
@@ -298,6 +317,128 @@ def parse_model_flags(raw_args: str) -> tuple[str, str, bool]:
 
     model_input = " ".join(filtered).strip()
     return (model_input, explicit_provider, is_global)
+
+
+def load_configured_model_targets(cfg: Optional[dict] = None) -> ConfiguredModelTargets:
+    """Load primary, fallback, and alias targets from config.yaml.
+
+    Normalizes both legacy ``fallback_model`` and current ``fallback_providers``
+    layouts into a display-friendly structure for /models-list in CLI + gateway.
+    """
+    if cfg is None:
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config() or {}
+        except Exception:
+            cfg = {}
+
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    model_cfg = cfg.get("model", {})
+    primary = None
+    if isinstance(model_cfg, dict):
+        primary_name = (model_cfg.get("default") or model_cfg.get("model") or "").strip()
+        if primary_name:
+            primary = ConfiguredModelTarget(
+                name=primary_name,
+                provider=(model_cfg.get("provider") or "unknown").strip() or "unknown",
+                base_url=(model_cfg.get("base_url") or "").strip(),
+                source="model.default",
+            )
+
+    fallback_entries = cfg.get("fallback_providers") or cfg.get("fallback_model") or []
+    if isinstance(fallback_entries, dict):
+        fallback_entries = [fallback_entries]
+    fallbacks: list[ConfiguredModelTarget] = []
+    fallback_source = "fallback_providers" if cfg.get("fallback_providers") else "fallback_model"
+    if isinstance(fallback_entries, list):
+        for entry in fallback_entries:
+            if not isinstance(entry, dict):
+                continue
+            model_name = (entry.get("model") or "").strip()
+            if not model_name:
+                continue
+            fallbacks.append(
+                ConfiguredModelTarget(
+                    name=model_name,
+                    provider=(entry.get("provider") or "unknown").strip() or "unknown",
+                    base_url=(entry.get("base_url") or "").strip(),
+                    source=fallback_source,
+                )
+            )
+
+    aliases: list[tuple[str, ConfiguredModelTarget]] = []
+    user_aliases = cfg.get("model_aliases")
+    if isinstance(user_aliases, dict):
+        for alias, entry in sorted(user_aliases.items()):
+            if not isinstance(entry, dict):
+                continue
+            model_name = (entry.get("model") or "").strip()
+            if not model_name:
+                continue
+            alias_key = str(alias).strip()
+            if not alias_key:
+                continue
+            aliases.append(
+                (
+                    alias_key,
+                    ConfiguredModelTarget(
+                        name=model_name,
+                        provider=(entry.get("provider") or "custom").strip() or "custom",
+                        base_url=(entry.get("base_url") or "").strip(),
+                        source="model_aliases",
+                    ),
+                )
+            )
+
+    return ConfiguredModelTargets(primary=primary, fallbacks=fallbacks, aliases=aliases)
+
+
+def format_configured_model_targets(
+    current_model: str,
+    current_provider: str,
+    current_base_url: str = "",
+    cfg: Optional[dict] = None,
+) -> str:
+    """Render a compact /models-list view for CLI and gateway."""
+
+    def _fmt_target(target: ConfiguredModelTarget) -> str:
+        provider = target.provider or "unknown"
+        base_url = (target.base_url or "").strip()
+        endpoint = f" @ {base_url}" if base_url else ""
+        return f"{target.name} ({provider}{endpoint})"
+
+    current_provider = (current_provider or "unknown").strip() or "unknown"
+    current_model = (current_model or "unknown").strip() or "unknown"
+    current_base_url = (current_base_url or "").strip()
+    current_endpoint = f" @ {current_base_url}" if current_base_url else ""
+
+    targets = load_configured_model_targets(cfg)
+    lines = [f"◆ Active session: {current_model} ({current_provider}{current_endpoint})", ""]
+
+    if targets.primary is not None:
+        lines.append(f"Configured primary: {_fmt_target(targets.primary)}")
+    else:
+        lines.append("Configured primary: (not set)")
+
+    lines.append("")
+    lines.append("Fallback targets:")
+    if targets.fallbacks:
+        for idx, entry in enumerate(targets.fallbacks, start=1):
+            lines.append(f"  {idx}. {_fmt_target(entry)}")
+    else:
+        lines.append("  (none configured)")
+
+    if targets.aliases:
+        lines.append("")
+        lines.append("Direct aliases:")
+        for alias, target in targets.aliases:
+            lines.append(f"  {alias} → {_fmt_target(target)}")
+
+    lines.append("")
+    lines.append("Use /model <query> to switch to any configured target.")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

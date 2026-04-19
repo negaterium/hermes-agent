@@ -4679,21 +4679,18 @@ class HermesCLI:
 
         user_provs = None
         custom_provs = None
+        try:
+            from hermes_cli.config import get_compatible_custom_providers, load_config
+            cfg = load_config()
+            user_provs = cfg.get("providers")
+            custom_provs = get_compatible_custom_providers(cfg)
+        except Exception:
+            pass
 
         # No args at all: open prompt_toolkit-native picker modal
         if not model_input and not explicit_provider:
             model_display = self.model or "unknown"
             provider_display = get_label(self.provider) if self.provider else "unknown"
-
-            user_provs = None
-            custom_provs = None
-            try:
-                from hermes_cli.config import get_compatible_custom_providers, load_config
-                cfg = load_config()
-                user_provs = cfg.get("providers")
-                custom_provs = get_compatible_custom_providers(cfg)
-            except Exception:
-                pass
 
             try:
                 providers = list_authenticated_providers(
@@ -4734,99 +4731,19 @@ class HermesCLI:
             custom_providers=custom_provs,
         )
 
-        if not result.success:
-            _cprint(f"  ✗ {result.error_message}")
-            return
+        self._apply_model_switch_result(result, persist_global)
 
-        # Apply to CLI state.
-        # Update requested_provider so _ensure_runtime_credentials() doesn't
-        # overwrite the switch on the next turn (it re-resolves from this).
-        old_model = self.model
-        self.model = result.new_model
-        self.provider = result.target_provider
-        self.requested_provider = result.target_provider
-        if result.api_key:
-            self.api_key = result.api_key
-            self._explicit_api_key = result.api_key
-        if result.base_url:
-            self.base_url = result.base_url
-            self._explicit_base_url = result.base_url
-        if result.api_mode:
-            self.api_mode = result.api_mode
+    def _handle_models_list_command(self):
+        """Handle /models-list — show configured primary model and fallback targets."""
+        from hermes_cli.model_switch import format_configured_model_targets
 
-        # Apply to running agent (in-place swap)
-        if self.agent is not None:
-            try:
-                self.agent.switch_model(
-                    new_model=result.new_model,
-                    new_provider=result.target_provider,
-                    api_key=result.api_key,
-                    base_url=result.base_url,
-                    api_mode=result.api_mode,
-                )
-            except Exception as exc:
-                _cprint(f"  ⚠ Agent swap failed ({exc}); change applied to next session.")
-
-        # Store a note to prepend to the next user message so the model
-        # knows a switch occurred (avoids injecting system messages mid-history
-        # which breaks providers and prompt caching).
-        self._pending_model_switch_note = (
-            f"[Note: model was just switched from {old_model} to {result.new_model} "
-            f"via {result.provider_label or result.target_provider}. "
-            f"Adjust your self-identification accordingly.]"
+        output = format_configured_model_targets(
+            current_model=self.model or "",
+            current_provider=self.provider or "",
+            current_base_url=self.base_url or "",
         )
-
-        # Display confirmation with full metadata
-        provider_label = result.provider_label or result.target_provider
-        _cprint(f"  ✓ Model switched: {result.new_model}")
-        _cprint(f"    Provider: {provider_label}")
-
-        # Rich metadata from models.dev
-        mi = result.model_info
-        if mi:
-            if mi.context_window:
-                _cprint(f"    Context: {mi.context_window:,} tokens")
-            if mi.max_output:
-                _cprint(f"    Max output: {mi.max_output:,} tokens")
-            if mi.has_cost_data():
-                _cprint(f"    Cost: {mi.format_cost()}")
-            _cprint(f"    Capabilities: {mi.format_capabilities()}")
-        else:
-            # Fallback to old context length lookup
-            try:
-                from agent.model_metadata import get_model_context_length
-                ctx = get_model_context_length(
-                    result.new_model,
-                    base_url=result.base_url or self.base_url,
-                    api_key=result.api_key or self.api_key,
-                    provider=result.target_provider,
-                )
-                _cprint(f"    Context: {ctx:,} tokens")
-            except Exception:
-                pass
-
-        # Cache notice
-        cache_enabled = (
-            ("openrouter" in (result.base_url or "").lower() and "claude" in result.new_model.lower())
-            or result.api_mode == "anthropic_messages"
-        )
-        if cache_enabled:
-            _cprint("    Prompt caching: enabled")
-
-        # Warning from validation
-        if result.warning_message:
-            _cprint(f"    ⚠ {result.warning_message}")
-
-        # Persistence
-        if persist_global:
-            save_config_value("model.default", result.new_model)
-            if result.provider_changed:
-                save_config_value("model.provider", result.target_provider)
-            save_config_value("model.base_url", result.base_url or None)
-            save_config_value("model.api_key", result.api_key or None)
-            _cprint("    Saved to config.yaml (--global)")
-        else:
-            _cprint("    (session only — add --global to persist)")
+        for line in output.splitlines():
+            _cprint(line)
 
     def _should_handle_model_command_inline(self, text: str, has_images: bool = False) -> bool:
         """Return True when /model should be handled immediately on the UI thread."""
@@ -5523,8 +5440,10 @@ class HermesCLI:
             self.new_session()
         elif canonical == "resume":
             self._handle_resume_command(cmd_original)
+        elif canonical == "models-list":
+            self._handle_models_list_command()
         elif canonical == "model":
-            self._handle_model_command(cmd_original)
+            self._handle_model_switch(cmd_original)
         elif canonical == "provider":
             self._show_model_and_providers()
         elif canonical == "prompt":

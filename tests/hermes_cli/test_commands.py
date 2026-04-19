@@ -98,6 +98,7 @@ class TestResolveCommand:
         assert resolve_command("bg").name == "background"
         assert resolve_command("reset").name == "new"
         assert resolve_command("q").name == "queue"
+        assert resolve_command("ml").name == "models-list"
         assert resolve_command("exit").name == "quit"
         assert resolve_command("gateway").name == "platforms"
         assert resolve_command("set-home").name == "sethome"
@@ -190,7 +191,7 @@ class TestGatewayHelpLines:
         joined = "\n".join(lines)
         for cmd in COMMAND_REGISTRY:
             if cmd.cli_only and not cmd.gateway_config_gate:
-                assert f"`/{cmd.name}" not in joined, \
+                assert f"`/{cmd.name}`" not in joined, \
                     f"cli_only command /{cmd.name} should not be in gateway help"
 
     def test_includes_alias_note_for_bg(self):

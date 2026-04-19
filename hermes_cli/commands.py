@@ -99,8 +99,10 @@ COMMAND_REGISTRY: list[CommandDef] = [
     # Configuration
     CommandDef("config", "Show current configuration", "Configuration",
                cli_only=True),
-    CommandDef("model", "Show or switch the active model. Usage: /model [provider:model|model]",
-               "Configuration", aliases=("m",), args_hint="[provider:model|model]",
+    CommandDef("models-list", "Show configured primary, fallback, and alias model targets",
+               "Configuration", aliases=("ml",)),
+    CommandDef("model", "Switch model for this session",
+               "Configuration", aliases=("m",), args_hint="[model] [--global]",
                cli_only=True),
     CommandDef("provider", "Show available providers and current provider",
                "Configuration"),
