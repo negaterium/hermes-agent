@@ -329,7 +329,11 @@ For deeper analytics — token usage, cost estimates, tool breakdown, and activi
 
 ## Session Search Tool
 
-The agent has a built-in `session_search` tool that performs full-text search across all past conversations using SQLite's FTS5 engine.
+The agent has built-in session recall tools backed by SQLite's FTS5 engine:
+
+- `session_search` — search past conversations and get focused summaries
+- `session_list` — browse recent sessions by title/preview/timestamp
+- `session_read` — read a raw transcript excerpt for a specific session
 
 ### How It Works
 
@@ -350,9 +354,9 @@ The search supports standard FTS5 query syntax:
 
 ### When It's Used
 
-The agent is prompted to use session search automatically:
+The agent is prompted to use session recall automatically:
 
-> *"When the user references something from a past conversation or you suspect relevant prior context exists, use session_search to recall it before asking them to repeat themselves."*
+> *"When the user references something from a past conversation or you suspect relevant prior context exists, use session_search to recall it before asking them to repeat themselves. Use session_list to browse recent sessions and session_read when you need the raw transcript details from a specific session."*
 
 ## Per-Platform Session Tracking
 
