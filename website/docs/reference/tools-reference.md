@@ -163,11 +163,20 @@ Registered only when the agent is spawned by the kanban dispatcher (`HERMES_KANB
 | `rl_stop_training` | Stop a running training job. Use if metrics look bad, training is stagnant, or you want to try different settings. | TINKER_API_KEY, WANDB_API_KEY |
 | `rl_test_inference` | Quick inference test for any environment. Runs a few steps of inference + scoring using OpenRouter. Default: 3 steps x 16 completions = 48 rollouts per model, testing 3 models = 144 total. Tests environment loading, prompt construction, in… | TINKER_API_KEY, WANDB_API_KEY |
 
+## `knowledge` toolset
+
+| Tool | Description | Requires environment |
+|------|-------------|----------------------|
+| `knowledge_search` | Search your local knowledge base and notes. Use this for Obsidian vault notes, research docs, and other indexed local knowledge sources. This searches local knowledge only — it does not search the web. | — |
+| `knowledge_read` | Read a specific local knowledge-base document by qmd ref/path. | — |
+
 ## `session_search` toolset
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
 | `session_search` | Search your long-term memory of past conversations. This is your recall -- every past session is searchable, and this tool summarizes what happened. USE THIS PROACTIVELY when: - The user says 'we did this before', 'remember when', 'last ti… | — |
+| `session_list` | List recent past sessions with titles, previews, and timestamps. Use this when the user asks what you worked on recently or you want to browse recall candidates before reading one. | — |
+| `session_read` | Read a past session transcript excerpt by session_id. Use after session_list or session_search when you need the raw conversation details instead of a summary. | — |
 
 ## `skills` toolset
 
