@@ -263,6 +263,42 @@ async def _summarize_session(
 _HIDDEN_SESSION_SOURCES = ("tool",)
 
 
+def _resolve_to_parent_session_id(db, session_id: str) -> str:
+    """Walk a session's parent chain to find the root lineage session ID."""
+    visited = set()
+    sid = session_id
+    while sid and sid not in visited:
+        visited.add(sid)
+        try:
+            session = db.get_session(sid)
+            if not session:
+                break
+            parent = session.get("parent_session_id")
+            if parent:
+                sid = parent
+            else:
+                break
+        except Exception as e:
+            logging.debug(
+                "Error resolving parent for session %s: %s",
+                sid,
+                e,
+                exc_info=True,
+            )
+            break
+    return sid
+
+
+def _coerce_limit(limit: Any, default: int = 3, min_value: int = 1, max_value: int = 5) -> int:
+    """Defensively coerce model-provided limit values to a safe bounded int."""
+    if not isinstance(limit, int):
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = default
+    return max(min_value, min(limit, max_value))
+
+
 def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str:
     """Return metadata for the most recent sessions (no LLM calls)."""
     try:
@@ -276,15 +312,7 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str
         current_root = None
         if current_session_id:
             try:
-                sid = current_session_id
-                visited = set()
-                current_root = current_session_id
-                while sid and sid not in visited:
-                    visited.add(sid)
-                    current_root = sid
-                    s = db.get_session(sid)
-                    parent = s.get("parent_session_id") if s else None
-                    sid = parent if parent else None
+                current_root = _resolve_to_parent_session_id(db, current_session_id)
             except Exception:
                 current_root = current_session_id
 
@@ -320,6 +348,58 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str
         return tool_error(f"Failed to list recent sessions: {e}", success=False)
 
 
+def session_list(
+    limit: int = 10,
+    db=None,
+    current_session_id: str = None,
+) -> str:
+    """List recent sessions as metadata without LLM summarization."""
+    if db is None:
+        return tool_error("Session database not available.", success=False)
+    limit = _coerce_limit(limit, default=10, min_value=1, max_value=20)
+    return _list_recent_sessions(db, limit, current_session_id)
+
+
+def session_read(
+    session_id: str,
+    max_chars: int = 12000,
+    db=None,
+) -> str:
+    """Return a raw transcript excerpt for a single session."""
+    if db is None:
+        return tool_error("Session database not available.", success=False)
+    if not session_id or not str(session_id).strip():
+        return tool_error("session_id is required.", success=False)
+
+    if not isinstance(max_chars, int):
+        try:
+            max_chars = int(max_chars)
+        except (TypeError, ValueError):
+            max_chars = 12000
+    max_chars = max(200, min(max_chars, 50000))
+
+    session = db.get_session(session_id)
+    if not session:
+        return tool_error(f"Session '{session_id}' not found.", success=False)
+
+    messages = db.get_messages_as_conversation(session_id)
+    transcript = _format_conversation(messages)
+    truncated = False
+    if len(transcript) > max_chars:
+        transcript = transcript[:max_chars] + "\n\n...[transcript truncated]..."
+        truncated = True
+
+    return json.dumps({
+        "success": True,
+        "session_id": session_id,
+        "title": session.get("title") or None,
+        "source": session.get("source", "unknown"),
+        "started_at": session.get("started_at"),
+        "content": transcript,
+        "truncated": truncated,
+    }, ensure_ascii=False)
+
+
 def session_search(
     query: str,
     role_filter: str = None,
@@ -336,15 +416,7 @@ def session_search(
     if db is None:
         return tool_error("Session database not available.", success=False)
 
-    # Defensive: models (especially open-source) may send non-int limit values
-    # (None when JSON null, string "int", or even a type object).  Coerce to a
-    # safe integer before any arithmetic/comparison to prevent TypeError.
-    if not isinstance(limit, int):
-        try:
-            limit = int(limit)
-        except (TypeError, ValueError):
-            limit = 3
-    limit = max(1, min(limit, 5))  # Clamp to [1, 5]
+    limit = _coerce_limit(limit, default=3, min_value=1, max_value=5)
 
     # Recent sessions mode: when query is empty, return metadata for recent sessions.
     # No LLM calls — just DB queries for titles, previews, timestamps.
@@ -377,35 +449,8 @@ def session_search(
                 "message": "No matching sessions found.",
             }, ensure_ascii=False)
 
-        # Resolve child sessions to their parent — delegation stores detailed
-        # content in child sessions, but the user's conversation is the parent.
-        def _resolve_to_parent(session_id: str) -> str:
-            """Walk delegation chain to find the root parent session ID."""
-            visited = set()
-            sid = session_id
-            while sid and sid not in visited:
-                visited.add(sid)
-                try:
-                    session = db.get_session(sid)
-                    if not session:
-                        break
-                    parent = session.get("parent_session_id")
-                    if parent:
-                        sid = parent
-                    else:
-                        break
-                except Exception as e:
-                    logging.debug(
-                        "Error resolving parent for session %s: %s",
-                        sid,
-                        e,
-                        exc_info=True,
-                    )
-                    break
-            return sid
-
         current_lineage_root = (
-            _resolve_to_parent(current_session_id) if current_session_id else None
+            _resolve_to_parent_session_id(db, current_session_id) if current_session_id else None
         )
 
         # Group by resolved (parent) session_id, dedup, skip the current
@@ -414,7 +459,7 @@ def session_search(
         seen_sessions = {}
         for result in raw_results:
             raw_sid = result["session_id"]
-            resolved_sid = _resolve_to_parent(raw_sid)
+            resolved_sid = _resolve_to_parent_session_id(db, raw_sid)
             # Skip the current session lineage — the agent already has that
             # context, even if older turns live in parent fragments.
             if current_lineage_root and resolved_sid == current_lineage_root:
@@ -577,6 +622,50 @@ SESSION_SEARCH_SCHEMA = {
 }
 
 
+SESSION_LIST_SCHEMA = {
+    "name": "session_list",
+    "description": (
+        "List recent past sessions with titles, previews, and timestamps. "
+        "Use this when the user asks what we worked on recently or you need to browse recall candidates before reading one."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "Maximum sessions to return (default 10, max 20).",
+                "default": 10,
+            },
+        },
+        "required": [],
+    },
+}
+
+
+SESSION_READ_SCHEMA = {
+    "name": "session_read",
+    "description": (
+        "Read a past session transcript excerpt by session_id. "
+        "Use after session_list or session_search when you need the raw conversation details instead of a summary."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "session_id": {
+                "type": "string",
+                "description": "Exact session ID to read.",
+            },
+            "max_chars": {
+                "type": "integer",
+                "description": "Maximum transcript characters to return (default 12000, max 50000).",
+                "default": 12000,
+            },
+        },
+        "required": ["session_id"],
+    },
+}
+
+
 # --- Registry ---
 from tools.registry import registry, tool_error
 
@@ -592,4 +681,30 @@ registry.register(
         current_session_id=kw.get("current_session_id")),
     check_fn=check_session_search_requirements,
     emoji="🔍",
+)
+
+registry.register(
+    name="session_list",
+    toolset="session_search",
+    schema=SESSION_LIST_SCHEMA,
+    handler=lambda args, **kw: session_list(
+        limit=args.get("limit", 10),
+        db=kw.get("db"),
+        current_session_id=kw.get("current_session_id"),
+    ),
+    check_fn=check_session_search_requirements,
+    emoji="🗂️",
+)
+
+registry.register(
+    name="session_read",
+    toolset="session_search",
+    schema=SESSION_READ_SCHEMA,
+    handler=lambda args, **kw: session_read(
+        session_id=args.get("session_id", ""),
+        max_chars=args.get("max_chars", 12000),
+        db=kw.get("db"),
+    ),
+    check_fn=check_session_search_requirements,
+    emoji="📜",
 )
