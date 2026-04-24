@@ -15,6 +15,8 @@ import pytest
 from hermes_state import SessionDB
 from tools.session_search_tool import (
     SESSION_SEARCH_SCHEMA,
+    SESSION_LIST_SCHEMA,
+    SESSION_READ_SCHEMA,
     _HIDDEN_SESSION_SOURCES,
     _format_timestamp,
     session_search,
@@ -103,6 +105,25 @@ class TestHiddenSources:
     def test_tool_source_hidden(self):
         assert "tool" in _HIDDEN_SESSION_SOURCES
 
+    def test_standard_sources_not_hidden(self):
+        for src in ("cli", "telegram", "discord", "slack", "cron"):
+            assert src not in _HIDDEN_SESSION_SOURCES
+
+
+class TestSessionSearchSchema:
+    def test_keeps_cross_session_recall_guidance_without_current_session_nudge(self):
+        description = SESSION_SEARCH_SCHEMA["description"]
+        assert "past conversations" in description
+        assert "recent turns of the current session" not in description
+
+    def test_session_list_and_read_schemas_exist(self):
+        assert SESSION_LIST_SCHEMA["name"] == "session_list"
+        assert SESSION_READ_SCHEMA["name"] == "session_read"
+
+
+# =========================================================================
+# _format_timestamp
+# =========================================================================
 
 class TestFormatTimestamp:
     def test_unix_timestamp(self):
@@ -390,10 +411,140 @@ class TestShapePrecedence:
         ))
         assert result["mode"] == "scroll"
 
+    def test_session_list_returns_recent_sessions(self):
+        from unittest.mock import MagicMock
+        from tools.session_search_tool import session_list
+
+        mock_db = MagicMock()
+        mock_db.list_sessions_rich.return_value = [
+            {
+                "id": "s1",
+                "title": "First",
+                "source": "cli",
+                "started_at": 1700000000,
+                "last_active": 1700000100,
+                "message_count": 3,
+                "preview": "hello",
+                "parent_session_id": None,
+            },
+            {
+                "id": "s2",
+                "title": None,
+                "source": "telegram",
+                "started_at": 1700000200,
+                "last_active": 1700000300,
+                "message_count": 5,
+                "preview": "world",
+                "parent_session_id": None,
+            },
+        ]
+
+        result = json.loads(session_list(db=mock_db, limit=2))
+
+        assert result["success"] is True
+        assert result["count"] == 2
+        assert result["results"][0]["session_id"] == "s1"
+        assert result["results"][1]["source"] == "telegram"
+
+    def test_session_list_filters_current_and_children(self):
+        from unittest.mock import MagicMock
+        from tools.session_search_tool import session_list
+
+        mock_db = MagicMock()
+        mock_db.list_sessions_rich.return_value = [
+            {
+                "id": "root",
+                "title": "Current",
+                "source": "cli",
+                "started_at": 1700000000,
+                "last_active": 1700000100,
+                "message_count": 3,
+                "preview": "hello",
+                "parent_session_id": None,
+            },
+            {
+                "id": "child",
+                "title": "Child",
+                "source": "cli",
+                "started_at": 1700000001,
+                "last_active": 1700000101,
+                "message_count": 2,
+                "preview": "child",
+                "parent_session_id": "root",
+            },
+            {
+                "id": "other",
+                "title": "Other",
+                "source": "cli",
+                "started_at": 1700000200,
+                "last_active": 1700000300,
+                "message_count": 4,
+                "preview": "other",
+                "parent_session_id": None,
+            },
+        ]
+        mock_db.get_session.side_effect = lambda sid: {"parent_session_id": None} if sid == "root" else None
+
+        result = json.loads(session_list(db=mock_db, limit=5, current_session_id="root"))
+
+        assert result["success"] is True
+        assert [r["session_id"] for r in result["results"]] == ["other"]
+
+    def test_session_read_returns_transcript_excerpt(self):
+        from unittest.mock import MagicMock
+        from tools.session_search_tool import session_read
+
+        mock_db = MagicMock()
+        mock_db.get_session.return_value = {"id": "s1", "title": "Read me", "source": "cli", "started_at": 1700000000}
+        mock_db.get_messages_as_conversation.return_value = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there"},
+        ]
+
+        result = json.loads(session_read(session_id="s1", db=mock_db, max_chars=500))
+
+        assert result["success"] is True
+        assert result["session_id"] == "s1"
+        assert "[USER]: Hello" in result["content"]
+        assert result["truncated"] is False
+
+    def test_session_read_missing_session_returns_error(self):
+        from unittest.mock import MagicMock
+        from tools.session_search_tool import session_read
+
+        mock_db = MagicMock()
+        mock_db.get_session.return_value = None
+
+        result = json.loads(session_read(session_id="missing", db=mock_db))
+
+        assert result["success"] is False
+        assert "missing" in result["error"]
+
+    def test_session_read_truncates_large_transcript(self):
+        from unittest.mock import MagicMock
+        from tools.session_search_tool import session_read
+
+        mock_db = MagicMock()
+        mock_db.get_session.return_value = {"id": "s1", "title": "Read me", "source": "cli", "started_at": 1700000000}
+        mock_db.get_messages_as_conversation.return_value = [
+            {"role": "user", "content": "x" * 5000},
+        ]
+
+        result = json.loads(session_read(session_id="s1", db=mock_db, max_chars=200))
+
+        assert result["success"] is True
+        assert result["truncated"] is True
+        assert len(result["content"]) <= 260
+
     def test_empty_query_falls_back_to_browse(self, db):
         _seed_modpack_sessions(db)
         result = json.loads(session_search(query="   ", db=db))
         assert result["mode"] == "browse"
+
+    def test_limit_type_object_coerced_to_default(self):
+        """Model sends limit as a type object → should fall back to 3, not TypeError."""
+        from unittest.mock import MagicMock
+        from tools.session_search_tool import session_search
 
     def test_non_string_query_falls_back_to_browse(self, db):
         _seed_modpack_sessions(db)
