@@ -2,18 +2,43 @@
 .git
 .gitignore
 .gitmodules
+.worktrees/
 
 # Dependencies
 node_modules
 .venv
+/venv/
+*.egg-info/
+
+# Python caches / build artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
 
 # CI/CD
 .github
 
+# Local planning / shell state
+.plans/
+.envrc
+.vscode/
+.direnv/
+.nix-stamps/
+
 # Environment files
 .env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.development
+.env.test
+export*
 
 *.md
 
 # Runtime data (bind-mounted at /opt/data; must not leak into build context)
 data/
+logs/
+tmp/
+result
