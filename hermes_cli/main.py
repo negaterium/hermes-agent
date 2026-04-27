@@ -1449,6 +1449,7 @@ def select_provider_and_model(args=None):
         get_compatible_custom_providers,
         load_config,
         get_env_value,
+        read_raw_config,
     )
     from hermes_cli.providers import resolve_provider_full
 
@@ -1513,6 +1514,16 @@ def select_provider_and_model(args=None):
 
     def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
         custom_provider_map = {}
+        raw_cfg = read_raw_config()
+        raw_custom_entries = raw_cfg.get("custom_providers")
+        raw_by_name = {}
+        if isinstance(raw_custom_entries, list):
+            for raw_entry in raw_custom_entries:
+                if not isinstance(raw_entry, dict):
+                    continue
+                raw_name = str(raw_entry.get("name") or "").strip()
+                if raw_name and raw_name not in raw_by_name:
+                    raw_by_name[raw_name] = raw_entry
         for entry in get_compatible_custom_providers(cfg):
             if not isinstance(entry, dict):
                 continue
@@ -1527,10 +1538,14 @@ def select_provider_and_model(args=None):
                     resolve_provider(provider_key)
                 except AuthError:
                     key = provider_key
+            raw_entry = raw_by_name.get(name) or {}
+            raw_api_key = str(raw_entry.get("api_key") or "").strip()
+            raw_api_key_ref = raw_api_key if raw_api_key.startswith("${") and raw_api_key.endswith("}") else ""
             custom_provider_map[key] = {
                 "name": name,
                 "base_url": base_url,
                 "api_key": entry.get("api_key", ""),
+                "api_key_ref": raw_api_key_ref or entry.get("api_key_ref", ""),
                 "key_env": entry.get("key_env", ""),
                 "model": entry.get("model", ""),
                 "api_mode": entry.get("api_mode", ""),
@@ -3010,8 +3025,12 @@ def _model_flow_named_custom(config, provider_info):
     else:
         model["provider"] = "custom"
         model["base_url"] = base_url
-        if api_key:
-            model["api_key"] = api_key
+        if config_api_key:
+            model["api_key"] = config_api_key
+        elif key_env:
+            model["api_key"] = f"${{{key_env}}}"
+        else:
+            model.pop("api_key", None)
     # Apply api_mode from custom_providers entry, or clear stale value
     custom_api_mode = provider_info.get("api_mode", "")
     if custom_api_mode:
