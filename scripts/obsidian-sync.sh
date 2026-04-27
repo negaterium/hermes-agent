@@ -8,6 +8,7 @@ RCLONE_CONF="${RCLONE_CONF:-/root/.hermes/rclone-writable.conf}"
 CACHE_DIR="${RCLONE_CACHE_DIR:-/root/.hermes/cache/rclone}"
 LOG_FILE="${LOG_FILE:-/root/.hermes/logs/obsidian-sync.log}"
 ACTION="${1:-sync}"
+EXCLUDE_ARGS=(--exclude ".obsidian/**")
 
 mkdir -p "$(dirname "$LOG_FILE")" "$CACHE_DIR"
 
@@ -51,6 +52,7 @@ case "$ACTION" in
   sync)
     log "Starting bisync"
     if run_rclone "${common_args[@]}" bisync "$REMOTE" "$VAULT" \
+      "${EXCLUDE_ARGS[@]}" \
       "${bisync_args[@]}"
     then
       log "DONE (sync)"
@@ -65,6 +67,7 @@ case "$ACTION" in
   resync)
     log "Starting bisync --resync"
     run_rclone "${common_args[@]}" bisync "$REMOTE" "$VAULT" \
+      "${EXCLUDE_ARGS[@]}" \
       "${bisync_args[@]}" \
       --resync
     log "DONE (resync)"
@@ -72,13 +75,13 @@ case "$ACTION" in
 
   push)
     log "Starting push"
-    run_rclone "${common_args[@]}" sync "$VAULT" "$REMOTE"
+    run_rclone "${common_args[@]}" sync "$VAULT" "$REMOTE" "${EXCLUDE_ARGS[@]}"
     log "DONE (push)"
     ;;
 
   pull)
     log "Starting pull"
-    run_rclone "${common_args[@]}" sync "$REMOTE" "$VAULT" --update
+    run_rclone "${common_args[@]}" sync "$REMOTE" "$VAULT" "${EXCLUDE_ARGS[@]}" --update
     log "DONE (pull)"
     ;;
 

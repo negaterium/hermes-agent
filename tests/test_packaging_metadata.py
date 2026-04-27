@@ -61,8 +61,19 @@ def test_darkserver_repo_keeps_obsidian_sync_python_script_and_installs_it_on_st
     repo_script = (REPO_ROOT / "scripts" / "obsidian_sync.py").read_text(encoding="utf-8")
     startup = (REPO_ROOT / "scripts" / "darkserver-start.sh").read_text(encoding="utf-8")
 
+    assert 'EXCLUDES = ["--exclude", ".obsidian/**"]' in repo_script
+    assert 'print("EXCLUDES: .obsidian/**")' in repo_script
     assert '"path1 and path2 are out of sync"' in repo_script
     assert "refusing automatic --resync to protect vault state" in repo_script
     assert 'cmd = ["rclone", "bisync", REMOTE, LOCAL, *common, "--resync"]' not in repo_script
     assert "/root/.hermes/scripts/obsidian_sync.py" in startup
     assert "install -m 0755" in startup
+
+
+def test_darkserver_shell_obsidian_sync_helper_excludes_obsidian_subtree():
+    helper = (REPO_ROOT / "scripts" / "obsidian-sync.sh").read_text(encoding="utf-8")
+
+    assert 'EXCLUDE_ARGS=(--exclude ".obsidian/**")' in helper
+    assert 'sync "$VAULT" "$REMOTE" "${EXCLUDE_ARGS[@]}"' in helper
+    assert 'sync "$REMOTE" "$VAULT" "${EXCLUDE_ARGS[@]}" --update' in helper
+    assert 'bisync "$REMOTE" "$VAULT" \\\n      "${EXCLUDE_ARGS[@]}" \\\n      "${bisync_args[@]}"' in helper

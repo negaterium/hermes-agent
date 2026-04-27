@@ -9,6 +9,7 @@ REMOTE = "onedrive:Documents/Obsidian Vault/"
 LOCAL = "/root/.hermes/obsidian-vault/"
 CONFIG = "/root/.hermes/rclone-writable.conf"
 LOG = "/root/.hermes/logs/obsidian-sync.log"
+EXCLUDES = ["--exclude", ".obsidian/**"]
 
 
 def ts() -> str:
@@ -52,7 +53,7 @@ def main() -> int:
     args = parser.parse_args()
 
     mode = "sync" if args.mode == "auto" else args.mode
-    common = ["--config", CONFIG]
+    common = ["--config", CONFIG, *EXCLUDES]
     if args.dry_run:
         common.append("--dry-run")
 
@@ -89,6 +90,7 @@ def main() -> int:
     print(f"MODE: {mode}")
     print(f"REMOTE: {REMOTE}")
     print(f"LOCAL: {LOCAL}")
+    print("EXCLUDES: .obsidian/**")
     print(f"DRY_RUN: {args.dry_run}")
     if summary:
         print("SUMMARY:")
