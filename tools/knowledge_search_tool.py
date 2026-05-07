@@ -33,7 +33,7 @@ KNOWLEDGE_SEARCH_SCHEMA = {
                 "type": "string",
                 "enum": ["keyword", "semantic", "hybrid"],
                 "description": "keyword = BM25, semantic = vector, hybrid = qmd query with reranking.",
-                "default": "hybrid",
+                "default": "semantic",
             },
         },
         "required": ["query"],
@@ -71,7 +71,7 @@ def check_knowledge_requirements() -> bool:
     return _get_backend().is_available()
 
 
-def knowledge_search(query: str, limit: int = 5, mode: str = "hybrid") -> str:
+def knowledge_search(query: str, limit: int = 5, mode: str = "semantic") -> str:
     backend = _get_backend()
     if not backend.is_available():
         return tool_error(
@@ -79,7 +79,7 @@ def knowledge_search(query: str, limit: int = 5, mode: str = "hybrid") -> str:
             success=False,
         )
 
-    mode = (mode or "hybrid").strip().lower()
+    mode = (mode or "semantic").strip().lower()
     if mode not in _VALID_MODES:
         return tool_error(
             f"Invalid mode '{mode}'. Expected one of: keyword, semantic, hybrid.",
@@ -113,7 +113,7 @@ registry.register(
     handler=lambda args, **kw: knowledge_search(
         query=args.get("query", ""),
         limit=args.get("limit", 5),
-        mode=args.get("mode", "hybrid"),
+        mode=args.get("mode", "semantic"),
     ),
     check_fn=check_knowledge_requirements,
     emoji="🧠",
