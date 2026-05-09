@@ -143,7 +143,7 @@ from agent.think_scrubber import StreamingThinkScrubber
 from agent.retry_utils import jittered_backoff
 from agent.error_classifier import classify_api_error, FailoverReason
 from agent.prompt_builder import (
-    DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
+    DEFAULT_AGENT_IDENTITY,
     MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
     KANBAN_GUIDANCE,
@@ -160,7 +160,7 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, build_platform_hint, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, build_google_model_operational_guidance, build_openai_model_execution_guidance
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
@@ -187,6 +187,93 @@ from agent.trajectory import (
 )
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, normalize_proxy_url
 from hermes_cli.config import cfg_get
+
+
+_TOOL_QUERY_STOPWORDS = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "best", "by", "do",
+        "for", "from", "go", "help", "how", "i", "if", "in", "into",
+        "is", "it", "me", "my", "of", "on", "or", "please", "should",
+        "tell", "that", "the", "this", "to", "use", "using", "we",
+        "what", "with", "you",
+    }
+)
+
+_TOOL_ALWAYS_KEEP = frozenset(
+    {
+        "clarify",
+        "memory",
+        "read_file",
+        "search_files",
+        "skill_view",
+        "skills_list",
+        "todo",
+    }
+)
+
+_TOOL_QUERY_KEYWORDS = {
+    "browser": (
+        "browser", "click", "fill", "form", "iframe", "login", "navigate",
+        "page", "screenshot", "scroll", "site", "website",
+    ),
+    "clarify": ("clarify", "question", "unsure"),
+    "code_execution": (
+        "calculate", "calculation", "compute", "csv", "json", "loop",
+        "math", "parse", "python", "script",
+    ),
+    "cronjob": (
+        "alert", "cron", "daily", "every", "hourly", "monitor", "recurring",
+        "remind", "reminder", "schedule", "weekly",
+    ),
+    "delegation": (
+        "agents", "compare", "parallel", "research", "subagent", "subagents",
+        "synthesize",
+    ),
+    "file": (
+        "code", "diff", "edit", "file", "line", "module", "path", "repo",
+        "repository", "search", "source", "write",
+    ),
+    "homeassistant": (
+        "climate", "device", "entity", "ha", "home assistant", "light",
+        "lock", "sensor", "switch", "thermostat",
+    ),
+    "image_gen": ("diagram", "draw", "image", "logo", "picture"),
+    "knowledge": ("knowledge", "note", "notes", "obsidian", "vault"),
+    "memory": ("memory", "remember"),
+    "messaging": ("deliver", "discord", "email", "message", "send", "slack", "telegram", "sms"),
+    "moa": ("hard", "hardest", "proof", "rigorous", "very difficult"),
+    "session_search": ("before", "last time", "past", "previous", "recall", "session"),
+    "skills": (
+        "configure", "gateway", "hermes", "install", "model", "provider",
+        "setup", "skill", "troubleshoot",
+    ),
+    "terminal": (
+        "bash", "build", "command", "container", "docker", "git", "install",
+        "log", "logs", "port", "process", "pty", "pytest", "run", "server",
+        "shell", "terminal", "test",
+    ),
+    "tts": ("audio", "read aloud", "speech", "speak", "tts", "voice"),
+    "web": ("api docs", "docs", "internet", "news", "search", "url", "web", "website"),
+}
+
+_TOOLSET_BUNDLES = {
+    "browser": {"browser"},
+    "code_execution": {"code_execution"},
+    "cronjob": {"cronjob"},
+    "delegation": {"delegation"},
+    "file": {"file"},
+    "homeassistant": {"homeassistant"},
+    "image_gen": {"image_gen"},
+    "knowledge": {"knowledge"},
+    "memory": {"memory"},
+    "messaging": {"messaging"},
+    "moa": {"moa"},
+    "session_search": {"session_search"},
+    "skills": {"skills"},
+    "terminal": {"terminal"},
+    "tts": {"tts"},
+    "web": {"web", "search"},
+}
 
 
 
@@ -2311,6 +2398,14 @@ class AIAgent:
                     self.valid_tool_names.add(_tname)
                     self._context_engine_tool_names.add(_tname)
                     _existing_tool_names.add(_tname)
+
+        # Preserve the complete post-init tool surface so a first-turn gating
+        # pass can narrow schemas for new sessions without losing the original
+        # fallback set.
+        self._full_tools = list(self.tools or [])
+        self._full_valid_tool_names = set(self.valid_tool_names)
+        self._initial_tool_gating_applied = False
+        self._tool_gating_summary = None
 
         # Notify context engine of session start
         if hasattr(self, "context_compressor") and self.context_compressor:
@@ -5718,6 +5813,150 @@ class AIAgent:
         """Check if an interrupt has been requested."""
         return self._interrupt_requested
 
+    def _normalize_tool_query_terms(self, text: str) -> list[str]:
+        normalized = re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+        return [
+            term for term in normalized.split()
+            if len(term) >= 2 and term not in _TOOL_QUERY_STOPWORDS
+        ]
+
+    def _score_initial_tool_schema(
+        self,
+        tool_def: Dict[str, Any],
+        query_terms: list[str],
+        normalized_query: str,
+    ) -> int:
+        fn = tool_def.get("function", {}) if isinstance(tool_def, dict) else {}
+        name = str(fn.get("name") or "")
+        description = str(fn.get("description") or "")
+        toolset = get_toolset_for_tool(name) or ""
+
+        norm_name = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+        norm_desc = re.sub(r"[^a-z0-9]+", " ", description.lower()).strip()
+        norm_toolset = re.sub(r"[^a-z0-9]+", " ", toolset.lower()).strip()
+        compact_query = normalized_query.replace(" ", "")
+        compact_name = norm_name.replace(" ", "")
+        combined = " ".join(part for part in (norm_name, norm_desc, norm_toolset) if part)
+
+        score = 0
+        if norm_name and norm_name in normalized_query:
+            score += 18
+        if compact_name and compact_name in compact_query:
+            score += 14
+
+        for term in query_terms:
+            if term in norm_name:
+                score += 7
+            if term in norm_desc:
+                score += 3
+            if term in norm_toolset:
+                score += 5
+
+        matched_terms = sum(1 for term in query_terms if term in combined)
+        if matched_terms:
+            score += matched_terms * 2
+
+        keyword_buckets = []
+        if toolset:
+            keyword_buckets.append(toolset)
+        keyword_buckets.append(name)
+        for bucket in keyword_buckets:
+            for keyword in _TOOL_QUERY_KEYWORDS.get(bucket, ()):
+                if keyword in normalized_query:
+                    score += 12 if bucket == toolset else 8
+
+        return score
+
+    def _maybe_specialize_tool_surface_for_query(self, query: str) -> None:
+        """Narrow first-turn tool schemas for informative new-session queries.
+
+        This keeps continuation sessions unchanged for prefix-cache stability.
+        The full post-init tool surface remains available on ``self._full_tools``
+        as a fallback/debug reference.
+        """
+        if self._initial_tool_gating_applied:
+            return
+        self._initial_tool_gating_applied = True
+
+        full_tools = list(getattr(self, "_full_tools", None) or self.tools or [])
+        if len(full_tools) <= 12:
+            return
+
+        query_terms = self._normalize_tool_query_terms(query)
+        normalized_query = re.sub(r"[^a-z0-9]+", " ", (query or "").lower()).strip()
+        if len(query_terms) < 2 or len(normalized_query) < 16:
+            return
+
+        selected_toolsets = set()
+        for toolset_name, keywords in _TOOL_QUERY_KEYWORDS.items():
+            if any(keyword in normalized_query for keyword in keywords):
+                selected_toolsets.update(_TOOLSET_BUNDLES.get(toolset_name, {toolset_name}))
+
+        # Coding / maintenance requests usually need the local editing bundle.
+        if any(term in normalized_query for term in ("bug", "code", "debug", "fix", "implement", "test")):
+            selected_toolsets.update({"file", "terminal"})
+
+        ranked: list[tuple[int, str, Dict[str, Any]]] = []
+        for tool_def in full_tools:
+            fn = tool_def.get("function", {}) if isinstance(tool_def, dict) else {}
+            name = str(fn.get("name") or "")
+            toolset = get_toolset_for_tool(name) or ""
+            score = self._score_initial_tool_schema(tool_def, query_terms, normalized_query)
+
+            if name in _TOOL_ALWAYS_KEEP:
+                score += 100
+            if toolset and toolset in selected_toolsets:
+                score += 40
+            if not toolset and name:
+                # Unknown / plugin / context-engine tools: keep them unless we have
+                # a strong reason to trim. Their footprint is usually modest and the
+                # safety cost of hiding them is higher.
+                score += 35
+
+            if score <= 0:
+                continue
+            if (
+                score < 8
+                and name not in _TOOL_ALWAYS_KEEP
+                and (not toolset or toolset not in selected_toolsets)
+            ):
+                continue
+            ranked.append((score, name, tool_def))
+
+        if not ranked:
+            return
+
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        filtered_tools: list[Dict[str, Any]] = []
+        kept_names: set[str] = set()
+        for score, name, tool_def in ranked:
+            if name in kept_names:
+                continue
+            filtered_tools.append(tool_def)
+            kept_names.add(name)
+            # Keep the shortlisted tool surface reasonably broad for first-turn
+            # autonomy, but far below the full default schema dump.
+            if len(filtered_tools) >= 16 and len(kept_names & _TOOL_ALWAYS_KEEP) == len(_TOOL_ALWAYS_KEEP):
+                break
+
+        if len(filtered_tools) >= len(full_tools):
+            return
+        if len(filtered_tools) < max(6, len(_TOOL_ALWAYS_KEEP)):
+            return
+
+        self.tools = filtered_tools
+        self.valid_tool_names = {tool.get("function", {}).get("name") for tool in filtered_tools if isinstance(tool, dict)}
+        self.valid_tool_names.discard(None)
+        self._tool_gating_summary = {
+            "query": query,
+            "kept": sorted(self.valid_tool_names),
+            "dropped_count": max(0, len(full_tools) - len(filtered_tools)),
+            "full_count": len(full_tools),
+        }
+        if not self.quiet_mode:
+            self._safe_print(
+                f"⚙ Reduced first-turn tool surface: {len(filtered_tools)}/{len(full_tools)} tools"
+            )
 
 
 
@@ -5734,23 +5973,18 @@ class AIAgent:
           * ``stable``  — content that is byte-stable across sessions for a
             given user config: identity, tool guidance, skills prompt,
             environment hints, platform hints, model-family operational
-            guidance.  Eligible for cross-session 1h prompt caching when
-            placed as a separate Anthropic content block (see
-            ``apply_anthropic_cache_control_long_lived``).
+            guidance. Eligible for cross-session 1h prompt caching when
+            placed as a separate Anthropic content block.
           * ``context`` — context files (AGENTS.md, .cursorrules, etc.) and
-            caller-supplied system_message.  Stable within a session but may
-            change between sessions when files are edited or the cwd
-            differs.  Cached within-session via the rolling messages
-            breakpoint (5m TTL); not promoted to the long-lived tier so
-            edits don't poison the cross-session cache.
+            caller-supplied system_message. Stable within a session but may
+            change between sessions when files are edited or the cwd differs.
           * ``volatile`` — content that changes on most turns/sessions:
             memory snapshot, user profile, external memory provider block,
-            timestamp line.  Never marked for caching.
+            timestamp line. Never marked for caching.
 
-        Joined ``stable\\n\\ncontext\\n\\nvolatile`` produces the same
-        logical content the old single-string builder produced, with the
-        guarantee that volatile content is at the end (cache-friendly
-        ordering for any provider that does prefix caching).
+        Joined ``stable\\n\\ncontext\\n\\nvolatile`` reproduces the full
+        logical prompt while keeping volatile content at the end for prefix
+        caching friendliness.
         """
         # ── Stable tier ────────────────────────────────────────────────
         stable_parts: List[str] = []
@@ -5770,7 +6004,8 @@ class AIAgent:
             stable_parts.append(DEFAULT_AGENT_IDENTITY)
 
         # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
-        stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
+        if "skill_view" in self.valid_tool_names:
+            stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
 
         # Tool-aware behavioral guidance: only inject when the tools are loaded
         tool_guidance = []
@@ -5825,11 +6060,15 @@ class AIAgent:
                 # Google model operational guidance (conciseness, absolute
                 # paths, parallel tool calls, verify-before-edit, etc.)
                 if "gemini" in _model_lower or "gemma" in _model_lower:
-                    stable_parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
+                    stable_parts.append(
+                        build_google_model_operational_guidance(self.valid_tool_names)
+                    )
                 # OpenAI GPT/Codex execution discipline (tool persistence,
                 # prerequisite checks, verification, anti-hallucination).
                 if "gpt" in _model_lower or "codex" in _model_lower:
-                    stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
+                    stable_parts.append(
+                        build_openai_model_execution_guidance(self.valid_tool_names)
+                    )
 
         has_skills_tools = any(name in self.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
         if has_skills_tools:
@@ -5843,6 +6082,7 @@ class AIAgent:
             skills_prompt = build_skills_system_prompt(
                 available_tools=self.valid_tool_names,
                 available_toolsets=avail_toolsets,
+                query=skill_query,
             )
         else:
             skills_prompt = ""
@@ -5871,8 +6111,9 @@ class AIAgent:
             stable_parts.append(_env_hints)
 
         platform_key = (self.platform or "").lower().strip()
-        if platform_key in PLATFORM_HINTS:
-            stable_parts.append(PLATFORM_HINTS[platform_key])
+        _platform_hint = build_platform_hint(platform_key, self.valid_tool_names)
+        if _platform_hint:
+            stable_parts.append(_platform_hint)
         elif platform_key:
             # Check plugin registry for platform-specific LLM guidance
             try:
@@ -10255,7 +10496,16 @@ class AIAgent:
             compressed.append({"role": "user", "content": todo_snapshot})
 
         self._invalidate_system_prompt()
-        new_system_prompt = self._build_system_prompt(system_message)
+        compression_skill_query = focus_topic
+        if not compression_skill_query:
+            for _msg in reversed(messages):
+                if _msg.get("role") != "user":
+                    continue
+                _candidate = _summarize_user_message_for_log(_msg.get("content", ""))
+                if _candidate:
+                    compression_skill_query = _candidate
+                    break
+        new_system_prompt = self._build_system_prompt(system_message, skill_query=compression_skill_query)
         self._cached_system_prompt = new_system_prompt
 
         if self._session_db:
@@ -11855,8 +12105,14 @@ class AIAgent:
                 # the previous turn so the Anthropic cache prefix matches.
                 self._cached_system_prompt = stored_prompt
             else:
-                # First turn of a new session — build from scratch.
-                self._cached_system_prompt = self._build_system_prompt(system_message)
+                # First turn of a new session — specialize the tool surface
+                # before building the prompt so tool schemas and prompt guidance
+                # stay aligned.
+                self._maybe_specialize_tool_surface_for_query(original_user_message)
+                self._cached_system_prompt = self._build_system_prompt(
+                    system_message,
+                    skill_query=original_user_message,
+                )
                 # Plugin hook: on_session_start
                 # Fired once when a brand-new session is created (not on
                 # continuation).  Plugins can use this to initialise
