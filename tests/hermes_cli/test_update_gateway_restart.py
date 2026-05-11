@@ -1068,6 +1068,7 @@ class TestFindGatewayPidsExclude:
 
     def test_excludes_specified_pids(self, monkeypatch):
         monkeypatch.setattr(gateway_cli, "is_windows", lambda: False)
+        monkeypatch.setattr(gateway_cli.os.path, "isdir", lambda p: False)
 
         def fake_run(cmd, **kwargs):
             return subprocess.CompletedProcess(
@@ -1088,6 +1089,7 @@ class TestFindGatewayPidsExclude:
 
     def test_no_exclude_returns_all(self, monkeypatch):
         monkeypatch.setattr(gateway_cli, "is_windows", lambda: False)
+        monkeypatch.setattr(gateway_cli.os.path, "isdir", lambda p: False)
 
         def fake_run(cmd, **kwargs):
             return subprocess.CompletedProcess(
@@ -1107,6 +1109,7 @@ class TestFindGatewayPidsExclude:
         assert 200 in pids
 
     def test_filters_to_current_profile(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(gateway_cli.os.path, "isdir", lambda p: False)
         profile_dir = tmp_path / ".hermes" / "profiles" / "orcha"
         profile_dir.mkdir(parents=True)
         monkeypatch.setattr(gateway_cli, "is_windows", lambda: False)
