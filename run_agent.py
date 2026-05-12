@@ -6258,7 +6258,7 @@ class AIAgent:
             "volatile": "\n\n".join(p.strip() for p in volatile_parts if p and p.strip()),
         }
 
-    def _build_system_prompt(self, system_message: str = None) -> str:
+    def _build_system_prompt(self, system_message: str = None, skill_query: str = None) -> str:
         """
         Assemble the full system prompt from all layers.
 
@@ -6273,7 +6273,7 @@ class AIAgent:
         mid-session, which is the only way to keep upstream prompt caches
         warm across turns.
         """
-        parts = self._build_system_prompt_parts(system_message=system_message)
+        parts = self._build_system_prompt_parts(system_message=system_message, skill_query=skill_query)
         joined = "\n\n".join(p for p in (parts["stable"], parts["context"], parts["volatile"]) if p)
         return joined
 
