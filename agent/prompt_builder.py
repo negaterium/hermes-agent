@@ -144,9 +144,9 @@ MEMORY_GUIDANCE = (
     "You have persistent memory across sessions. Save durable facts with the memory tool: "
     "user preferences, environment details, tool quirks, and stable conventions. Keep memory "
     "compact because it is injected into every turn.\n"
-    "Prefer facts that reduce future user steering. Use memory for stable user/environment facts, "
-    "session_search/session_list/session_read for past conversations and fixes, and "
-    "knowledge_search/knowledge_read for local notes or indexed docs.\n"
+    "Use memory for stable facts that reduce future user steering. Use session_search/"
+    "session_list/session_read for past conversations and fixes, and knowledge_search/"
+    "knowledge_read for local notes or indexed docs.\n"
     "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO state. "
     "Use session_search for those. Save reusable procedures as skills instead.\n"
     "Write memories as declarative facts, not instructions: 'User prefers concise responses' ✓; "
@@ -154,18 +154,16 @@ MEMORY_GUIDANCE = (
 )
 
 SESSION_SEARCH_GUIDANCE = (
-    "When the user references something from a past conversation or you suspect relevant "
-    "cross-session context exists, use session_search before asking them to repeat it. "
-    "Use session_list for recent sessions, session_read for raw transcript details, and "
-    "knowledge_search/knowledge_read when the answer is more likely to be in local notes "
-    "or indexed documents."
+    "When the user references a past conversation or relevant cross-session context exists, "
+    "use session_search before asking them to repeat it. Use session_list for recent sessions, "
+    "session_read for transcript details, and knowledge_search/knowledge_read when the answer "
+    "is more likely to be in local notes or indexed documents."
 )
 
 SKILLS_GUIDANCE = (
     "After a complex task, tricky fix, or non-trivial workflow, save the approach with "
     "skill_manage so it can be reused.\n"
-    "If a loaded skill is outdated, incomplete, or wrong, patch it immediately with "
-    "skill_manage(action='patch')."
+    "If a loaded skill is outdated, incomplete, or wrong, patch it immediately."
 )
 
 KANBAN_GUIDANCE = (
@@ -189,12 +187,7 @@ KANBAN_GUIDANCE = (
     "files outside it unless the task explicitly asks.\n"
     "3. **Heartbeat on long operations.** Call `kanban_heartbeat(note=...)` "
     "every few minutes during long subprocesses (training, encoding, crawling). "
-    "Skip heartbeats for short tasks. **If your task may run longer than 1 hour, "
-    "you MUST call `kanban_heartbeat` at least once an hour** — the dispatcher "
-    "reclaims tasks running past `kanban.dispatch_stale_timeout_seconds` "
-    "(default 4 hours) when no heartbeat has arrived in the last hour. A "
-    "reclaim re-queues the task as `ready` without penalty (no failure counter "
-    "tick), but you lose your current run's progress.\n"
+    "Skip heartbeats for short tasks.\n"
     "4. **Block on genuine ambiguity.** If you need a human decision you cannot "
     "infer (missing credentials, UX choice, paywalled source, peer output you "
     "need first), call `kanban_block(reason=\"...\")` and stop. Don't guess. "
@@ -241,16 +234,16 @@ KANBAN_GUIDANCE = (
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
-    "You MUST act with tools when tools can make progress. Do not describe or promise work "
-    "without making the matching tool call in the same response.\n"
-    "If you say you will run tests, check a file, create something, or inspect a system, do it now. "
+    "You MUST use tools when they can make progress. Do not describe or promise work without making the "
+    "matching tool call in the same response.\n"
+    "If you say you will run tests, inspect a system, check a file, or create something, do it now. "
     "Do not stop at a plan when tools can continue.\n"
-    "Every response should either (a) include tool calls that make progress or (b) deliver the final result."
+    "Each response should either include tool calls that make progress or deliver the final result."
 )
 
 # Model name substrings that trigger tool-use enforcement guidance.
 # Add new patterns here when a model family needs explicit steering.
-TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek")
+TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm")
 
 # Universal "finish the job" guidance — applied to ALL models, not gated
 # by model family.  Addresses two cross-model failure modes:
@@ -1005,7 +998,7 @@ _SKILL_QUERY_STOPWORDS = frozenset(
         "to", "up", "use", "using", "want", "with",
     }
 )
-_DEFAULT_SKILL_CANDIDATE_LIMIT = 12
+_DEFAULT_SKILL_CANDIDATE_LIMIT = 8
 
 
 def _skills_prompt_snapshot_path() -> Path:
