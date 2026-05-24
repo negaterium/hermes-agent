@@ -32,18 +32,32 @@ if (!fs.existsSync(f)) {
   process.exit(1);
 }
 const src = fs.readFileSync(f, 'utf8');
-const target = /const loadLlama = async \(gpu\) => await getLlama\(\{\n\s*build: "autoAttempt",\n\s*logLevel: LlamaLogLevel\.error,\n\s*gpu,\n\s*\}\);/;
 let patched = src;
-if (target.test(src)) {
+
+const legacyTarget = /const loadLlama = async \(gpu\) => await getLlama\(\{\n\s*build: "autoAttempt",\n\s*logLevel: LlamaLogLevel\.error,\n\s*gpu,\n\s*\}\);/;
+const currentTarget = /const loadLlama = async \(gpu, sourceBuildAllowed = allowBuild, buildOverride\) => await withNativeStdoutRedirectedToStderr\(\(\) => getLlama\(\{[\s\S]*?build: buildOverride \?\? \(sourceBuildAllowed \? "auto" : "never"\),[\s\S]*?logLevel: LlamaLogLevel\.error,[\s\S]*?gpu,[\s\S]*?progressLogs: false,[\s\S]*?skipDownload: !sourceBuildAllowed,[\s\S]*?\}\)\);/;
+
+if (legacyTarget.test(src)) {
   patched = src.replace(
-    target,
+    legacyTarget,
     `const loadLlama = async (gpu) => await getLlama({\n                build: "never",\n                logLevel: LlamaLogLevel.error,\n                gpu: false,\n            });`
   );
+} else if (currentTarget.test(src)) {
+  patched = src.replace(
+    currentTarget,
+    `const loadLlama = async (gpu, sourceBuildAllowed = allowBuild, buildOverride) => await withNativeStdoutRedirectedToStderr(() => getLlama({\n                build: "never",\n                logLevel: LlamaLogLevel.error,\n                gpu: false,\n                progressLogs: false,\n                skipDownload: true,\n            }));`
+  );
 }
-if (patched === src && !src.includes('build: "never"')) {
-  console.error('QMD patch failed: expected getLlama stanza not found');
+
+if (patched === src) {
+  if (src.includes('build: "never"') && src.includes('gpu: false')) {
+    console.log(`QMD llm.js already patched at ${f}.`);
+    process.exit(0);
+  }
+  console.error('QMD patch failed: no known getLlama stanza matched');
   process.exit(1);
 }
+
 fs.writeFileSync(f, patched);
 console.log(`QMD llm.js patched for CPU prebuilt mode at ${f}.`);
 EOF

@@ -28,7 +28,27 @@ def test_search_hybrid_mode_uses_qmd_query_and_parses_json():
     assert calls[0][:3] == ["qmd", "query", "vault memory"]
     assert result["success"] is True
     assert result["mode"] == "hybrid"
+    assert result["requested_mode"] == "hybrid"
     assert result["results"][0]["title"] == "Foo"
+
+
+def test_search_hybrid_falls_back_to_semantic_on_timeout():
+    calls = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        if cmd[1] == "query":
+            raise subprocess.TimeoutExpired(cmd="qmd query", timeout=25)
+        return _Result(stdout='[{"id":"qmd://obsidian/fallback.md","title":"Fallback"}]')
+
+    backend = QmdKnowledgeBackend(which=lambda _name: "/usr/bin/qmd", runner=fake_run)
+    result = backend.search("vault memory", limit=5, mode="hybrid")
+
+    assert [call[1] for call in calls] == ["query", "vsearch"]
+    assert result["success"] is True
+    assert result["mode"] == "semantic"
+    assert result["requested_mode"] == "hybrid"
+    assert result["fallback_from"] == "hybrid"
 
 
 def test_search_keyword_mode_uses_qmd_search():

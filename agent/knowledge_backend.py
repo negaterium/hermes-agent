@@ -18,6 +18,13 @@ class QmdKnowledgeBackend:
         "hybrid": "query",
     }
 
+    _COMMAND_TIMEOUTS = {
+        "keyword": 10,
+        "semantic": 15,
+        "hybrid": 25,
+        "read": 10,
+    }
+
     def __init__(
         self,
         *,
@@ -41,14 +48,31 @@ class QmdKnowledgeBackend:
             "data_dir": os.getenv("QMD_DATA_DIR", ""),
         }
 
-    def search(self, query: str, limit: int = 5, mode: str = "hybrid") -> Dict[str, Any]:
-        mode = (mode or "hybrid").strip().lower()
+    def search(self, query: str, limit: int = 5, mode: str = "semantic") -> Dict[str, Any]:
+        requested_mode = (mode or "semantic").strip().lower()
+        mode = requested_mode
         if mode not in self._MODE_TO_SUBCOMMAND:
             return {"success": False, "error": f"Invalid knowledge search mode: {mode}"}
         if not self.is_available():
             return {"success": False, "error": "qmd is not installed or not on PATH."}
 
         limit = max(1, min(int(limit), 10))
+        result = self._search_with_mode(query=query, limit=limit, mode=mode)
+        if result["success"]:
+            result.setdefault("requested_mode", requested_mode)
+            return result
+
+        if mode == "hybrid":
+            fallback = self._search_with_mode(query=query, limit=limit, mode="semantic")
+            if fallback["success"]:
+                fallback["requested_mode"] = requested_mode
+                fallback["fallback_from"] = "hybrid"
+                fallback["fallback_reason"] = result["error"]
+            return fallback
+
+        return result
+
+    def _search_with_mode(self, query: str, limit: int, mode: str) -> Dict[str, Any]:
         cmd = [
             "qmd",
             self._MODE_TO_SUBCOMMAND[mode],
@@ -59,7 +83,7 @@ class QmdKnowledgeBackend:
             str(limit),
             "--json",
         ]
-        result = self._run_command(cmd)
+        result = self._run_command(cmd, timeout=self._COMMAND_TIMEOUTS.get(mode, 15))
         if result["success"] is False:
             return result
 
@@ -86,7 +110,7 @@ class QmdKnowledgeBackend:
     def read(self, ref: str) -> Dict[str, Any]:
         if not self.is_available():
             return {"success": False, "error": "qmd is not installed or not on PATH."}
-        result = self._run_command(["qmd", "get", ref])
+        result = self._run_command(["qmd", "get", ref], timeout=self._COMMAND_TIMEOUTS["read"])
         if result["success"] is False:
             return result
         return {
@@ -95,7 +119,7 @@ class QmdKnowledgeBackend:
             "content": result["stdout"],
         }
 
-    def _run_command(self, cmd: List[str]) -> Dict[str, Any]:
+    def _run_command(self, cmd: List[str], timeout: int) -> Dict[str, Any]:
         try:
             completed = self._runner(
                 cmd,
@@ -103,6 +127,7 @@ class QmdKnowledgeBackend:
                 text=True,
                 check=False,
                 env=os.environ.copy(),
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired:
             return {"success": False, "error": "qmd command timed out."}

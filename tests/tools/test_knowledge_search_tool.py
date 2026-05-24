@@ -17,7 +17,7 @@ class _Backend:
     def is_available(self):
         return self.available
 
-    def search(self, query, limit=5, mode="hybrid"):
+    def search(self, query, limit=5, mode="semantic"):
         self.calls.append(("search", query, limit, mode))
         return {"success": True, "results": [{"id": "qmd://obsidian/foo.md"}], "mode": mode}
 
@@ -29,6 +29,7 @@ class _Backend:
 def test_knowledge_schemas_expose_expected_names():
     assert KNOWLEDGE_SEARCH_SCHEMA["name"] == "knowledge_search"
     assert KNOWLEDGE_READ_SCHEMA["name"] == "knowledge_read"
+    assert KNOWLEDGE_SEARCH_SCHEMA["parameters"]["properties"]["mode"]["default"] == "semantic"
 
 
 def test_check_requirements_reflects_backend_availability(monkeypatch):
