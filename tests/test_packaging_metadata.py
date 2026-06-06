@@ -342,8 +342,34 @@ def test_darkserver_repo_keeps_obsidian_sync_python_script_and_installs_it_on_st
     repo_script = (REPO_ROOT / "scripts" / "obsidian_sync.py").read_text(encoding="utf-8")
     startup = (REPO_ROOT / "scripts" / "darkserver-start.sh").read_text(encoding="utf-8")
 
+    assert 'default="safe-sync"' in repo_script
+    assert '"safe-sync", "sync", "push-ai", "push", "pull", "bisync", "auto"' in repo_script
+    assert 'mode in {"sync", "auto"}' in repo_script
+    assert 'mode == "push"' in repo_script
+    assert 'PULL_EXCLUDES = [' in repo_script
+    assert '".obsidian/"' in repo_script
+    assert '"AI/Memory/"' in repo_script
+    assert '"AI/Sessions/"' in repo_script
+    assert 'HERMES_PUSH_SUBTREES = [' in repo_script
+    assert '"AI/Memory"' in repo_script
+    assert '"AI/Sessions"' in repo_script
+    assert "find_conflict_artifacts" in repo_script
+    assert "find_stale_lock_files" in repo_script
+    assert "create_snapshot" in repo_script
+    assert "prune_old_snapshots" in repo_script
+    assert "rclone_copy_pull" in repo_script
+    assert "rclone_copy_subtree" in repo_script
     assert '"path1 and path2 are out of sync"' in repo_script
     assert "refusing automatic --resync to protect vault state" in repo_script
-    assert 'cmd = ["rclone", "bisync", REMOTE, LOCAL, *common, "--resync"]' not in repo_script
+    assert 'cmd = ["rclone", "bisync", REMOTE, LOCAL, common, "--resync"]' not in repo_script
     assert "/root/.hermes/scripts/obsidian_sync.py" in startup
     assert "install -m 0755" in startup
+
+
+def test_darkserver_shell_helper_delegates_to_python_safe_sync_helper():
+    shell_script = (REPO_ROOT / "scripts" / "obsidian-sync.sh").read_text(encoding="utf-8")
+
+    assert 'PY_SYNC="${PY_SYNC:-/root/.hermes/scripts/obsidian_sync.py}"' in shell_script
+    assert 'ACTION="${1:-safe-sync}"' in shell_script
+    assert "exec /usr/bin/env python3" in shell_script
+    assert "safe-sync|sync|auto|pull|push-ai|push|bisync" in shell_script
