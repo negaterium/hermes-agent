@@ -14,7 +14,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from hermes_constants import get_hermes_home, get_skills_dir, is_wsl
-from typing import Optional
+from typing import Collection, Optional
 
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.skill_utils import (
@@ -125,13 +125,10 @@ def _strip_yaml_frontmatter(content: str) -> str:
 # =========================================================================
 
 DEFAULT_AGENT_IDENTITY = (
-    "You are Hermes Agent, an intelligent AI assistant created by Nous Research. "
-    "You are helpful, knowledgeable, and direct. You assist users with a wide "
-    "range of tasks including answering questions, writing and editing code, "
-    "analyzing information, creative work, and executing actions via your tools. "
-    "You communicate clearly, admit uncertainty when appropriate, and prioritize "
-    "being genuinely useful over being verbose unless otherwise directed below. "
-    "Be targeted and efficient in your exploration and investigations."
+    "You are Hermes Agent from Nous Research. Be helpful, knowledgeable, direct, "
+    "and genuinely useful. Use tools to answer questions, inspect systems, edit code, "
+    "analyze information, and take actions. Communicate clearly, admit uncertainty "
+    "plainly, and stay targeted unless later instructions ask for more depth."
 )
 
 HERMES_AGENT_HELP_GUIDANCE = (
@@ -145,48 +142,40 @@ HERMES_AGENT_HELP_GUIDANCE = (
     "of truth when the two differ."
 )
 
+_MEDIA_OUTPUT_TOOL_NAMES = frozenset(
+    {
+        "execute_code",
+        "patch",
+        "terminal",
+        "text_to_speech",
+        "write_file",
+    }
+)
+
 MEMORY_GUIDANCE = (
-    "You have persistent memory across sessions. Save durable facts using the memory "
-    "tool: user preferences, environment details, tool quirks, and stable conventions. "
-    "Memory is injected into every turn, so keep it compact and focused on facts that "
-    "will still matter later.\n"
-    "Prioritize what reduces future user steering — the most valuable memory is one "
-    "that prevents the user from having to correct or remind you again. "
-    "User preferences and recurring corrections matter more than procedural task details.\n"
-    "Use the right recall layer: memory for stable facts about the user/environment, "
-    "session_search/session_list/session_read for past conversations and previous fixes, "
-    "and knowledge_search/knowledge_read for local notes or indexed documents.\n"
-    "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
-    "state to memory; use session_search to recall those from past transcripts. "
-    "Specifically: do not record PR numbers, issue numbers, commit SHAs, 'fixed bug X', "
-    "'submitted PR Y', 'Phase N done', file counts, or any artifact that will be stale "
-    "in 7 days. If a fact will be stale in a week, it does not belong in memory. "
-    "If you've discovered a new way to do something, solved a problem that could be "
-    "necessary later, save it as a skill with the skill tool.\n"
-    "Write memories as declarative facts, not instructions to yourself. "
-    "'User prefers concise responses' ✓ — 'Always respond concisely' ✗. "
-    "'Project uses pytest with xdist' ✓ — 'Run tests with pytest -n 4' ✗. "
-    "Imperative phrasing gets re-read as a directive in later sessions and can "
-    "cause repeated work or override the user's current request. Procedures and "
-    "workflows belong in skills, not memory."
+    "You have persistent memory across sessions. Save durable facts with the memory tool: "
+    "user preferences, environment details, tool quirks, and stable conventions. Keep memory "
+    "compact because it is injected into every turn.\n"
+    "Use memory for stable facts that reduce future user steering. Use session_search/"
+    "session_list/session_read for past conversations and fixes, and knowledge_search/"
+    "knowledge_read for local notes or indexed docs.\n"
+    "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO state. "
+    "Use session_search for those. Save reusable procedures as skills instead.\n"
+    "Write memories as declarative facts, not instructions: 'User prefers concise responses' ✓; "
+    "'Always respond concisely' ✗. Procedures and workflows belong in skills, not memory."
 )
 
 SESSION_SEARCH_GUIDANCE = (
-    "When the user references something from a past conversation or you suspect "
-    "relevant cross-session context exists, use session_search to recall it before "
-    "asking them to repeat themselves. Use session_list to browse recent sessions and "
-    "session_read when you need the raw transcript details from a specific session. "
-    "Use knowledge_search/knowledge_read instead when the answer is more likely to be "
-    "in local notes or indexed documents than in a past conversation."
+    "When the user references a past conversation or relevant cross-session context exists, "
+    "use session_search before asking them to repeat it. Use session_list for recent sessions, "
+    "session_read for transcript details, and knowledge_search/knowledge_read when the answer "
+    "is more likely to be in local notes or indexed documents."
 )
 
 SKILLS_GUIDANCE = (
-    "After completing a complex task (5+ tool calls), fixing a tricky error, "
-    "or discovering a non-trivial workflow, save the approach as a "
-    "skill with skill_manage so you can reuse it next time.\n"
-    "When using a skill and finding it outdated, incomplete, or wrong, "
-    "patch it immediately with skill_manage(action='patch') — don't wait to be asked. "
-    "Skills that aren't maintained become liabilities."
+    "After a complex task, tricky fix, or non-trivial workflow, save the approach with "
+    "skill_manage so it can be reused.\n"
+    "If a loaded skill is outdated, incomplete, or wrong, patch it immediately."
 )
 
 KANBAN_GUIDANCE = (
@@ -210,12 +199,7 @@ KANBAN_GUIDANCE = (
     "files outside it unless the task explicitly asks.\n"
     "3. **Heartbeat on long operations.** Call `kanban_heartbeat(note=...)` "
     "every few minutes during long subprocesses (training, encoding, crawling). "
-    "Skip heartbeats for short tasks. **If your task may run longer than 1 hour, "
-    "you MUST call `kanban_heartbeat` at least once an hour** — the dispatcher "
-    "reclaims tasks running past `kanban.dispatch_stale_timeout_seconds` "
-    "(default 4 hours) when no heartbeat has arrived in the last hour. A "
-    "reclaim re-queues the task as `ready` without penalty (no failure counter "
-    "tick), but you lose your current run's progress.\n"
+    "Skip heartbeats for short tasks.\n"
     "4. **Block on genuine ambiguity.** If you need a human decision you cannot "
     "infer (missing credentials, UX choice, paywalled source, peer output you "
     "need first), call `kanban_block(reason=\"...\")` and stop. Don't guess. "
@@ -287,17 +271,11 @@ KANBAN_GUIDANCE = (
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
-    "You MUST use your tools to take action — do not describe what you would do "
-    "or plan to do without actually doing it. When you say you will perform an "
-    "action (e.g. 'I will run the tests', 'Let me check the file', 'I will create "
-    "the project'), you MUST immediately make the corresponding tool call in the same "
-    "response. Never end your turn with a promise of future action — execute it now.\n"
-    "Keep working until the task is actually complete. Do not stop with a summary of "
-    "what you plan to do next time. If you have tools available that can accomplish "
-    "the task, use them instead of telling the user what you would do.\n"
-    "Every response should either (a) contain tool calls that make progress, or "
-    "(b) deliver a final result to the user. Responses that only describe intentions "
-    "without acting are not acceptable."
+    "You MUST use tools when they can make progress. Do not describe or promise work without making the "
+    "matching tool call in the same response.\n"
+    "If you say you will run tests, inspect a system, check a file, or create something, do it now. "
+    "Do not stop at a plan when tools can continue.\n"
+    "Each response should either include tool calls that make progress or deliver the final result."
 )
 
 # Model name substrings that trigger tool-use enforcement guidance.
@@ -388,11 +366,9 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "# Execution discipline\n"
     "<tool_persistence>\n"
     "- Use tools whenever they improve correctness, completeness, or grounding.\n"
-    "- Do not stop early when another tool call would materially improve the result.\n"
-    "- If a tool returns empty or partial results, retry with a different query or "
-    "strategy before giving up.\n"
-    "- Keep calling tools until: (1) the task is complete, AND (2) you have verified "
-    "the result.\n"
+    "- Do not stop early if another tool call would materially improve the result.\n"
+    "- If a tool returns empty or partial results, retry with a different query or strategy.\n"
+    "- Keep calling tools until the task is complete and verified.\n"
     "</tool_persistence>\n"
     "\n"
     "<mandatory_tool_use>\n"
@@ -404,25 +380,20 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "- File contents, sizes, line counts → use read_file, search_files, or terminal\n"
     "- Git history, branches, diffs → use terminal\n"
     "- Current facts (weather, news, versions) → use web_search\n"
-    "Your memory and user profile describe the USER, not the system you are "
-    "running on. The execution environment may differ from what the user profile "
-    "says about their personal setup.\n"
+    "Memory and user profile describe the USER, not the live system.\n"
     "</mandatory_tool_use>\n"
     "\n"
     "<act_dont_ask>\n"
-    "When a question has an obvious default interpretation, act on it immediately "
-    "instead of asking for clarification. Examples:\n"
+    "When a question has an obvious default interpretation, act immediately instead of asking. Examples:\n"
     "- 'Is port 443 open?' → check THIS machine (don't ask 'open where?')\n"
     "- 'What OS am I running?' → check the live system (don't use user profile)\n"
     "- 'What time is it?' → run `date` (don't guess)\n"
-    "Only ask for clarification when the ambiguity genuinely changes what tool "
-    "you would call.\n"
+    "Only clarify when the ambiguity changes the tool to call.\n"
     "</act_dont_ask>\n"
     "\n"
     "<prerequisite_checks>\n"
-    "- Before taking an action, check whether prerequisite discovery, lookup, or "
-    "context-gathering steps are needed.\n"
-    "- Do not skip prerequisite steps just because the final action seems obvious.\n"
+    "- Before acting, check whether prerequisite discovery, lookup, or context-gathering is needed.\n"
+    "- Do not skip prerequisite steps because the final action seems obvious.\n"
     "- If a task depends on output from a prior step, resolve that dependency first.\n"
     "</prerequisite_checks>\n"
     "\n"
@@ -437,8 +408,7 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "\n"
     "<missing_context>\n"
     "- If required context is missing, do NOT guess or hallucinate an answer.\n"
-    "- Use the appropriate lookup tool when missing information is retrievable "
-    "(search_files, web_search, read_file, etc.).\n"
+    "- Use the appropriate lookup tool when the information is retrievable (search_files, web_search, read_file, etc.).\n"
     "- Ask a clarifying question only when the information cannot be retrieved by tools.\n"
     "- If you must proceed with incomplete information, label assumptions explicitly.\n"
     "</missing_context>"
@@ -448,7 +418,6 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
 # Injected alongside TOOL_USE_ENFORCEMENT_GUIDANCE when the model is Gemini or Gemma.
 GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
     "# Google model operational directives\n"
-    "Follow these operational rules strictly:\n"
     "- **Absolute paths:** Always construct and use absolute file paths for all "
     "file system operations. Combine the project root with relative paths.\n"
     "- **Verify first:** Use read_file/search_files to check file contents and "
@@ -617,6 +586,166 @@ STEER_CHANNEL_NOTE = (
     "web pages, or files."
 )
 
+
+def _normalize_tool_name_set(available_tools: Optional[Collection[str]]) -> set[str]:
+    """Normalize tool-name collections for guidance builders."""
+    if not available_tools:
+        return set()
+    return {
+        str(name).strip()
+        for name in available_tools
+        if isinstance(name, str) and str(name).strip()
+    }
+
+
+def build_openai_model_execution_guidance(
+    available_tools: Optional[Collection[str]] = None,
+) -> str:
+    """Return GPT/Codex execution guidance, trimmed to the live tool surface."""
+    tools = _normalize_tool_name_set(available_tools)
+    if not tools:
+        return OPENAI_MODEL_EXECUTION_GUIDANCE
+
+    has_terminal = "terminal" in tools
+    has_execute_code = "execute_code" in tools
+    has_file_read = bool({"read_file", "search_files"} & tools)
+    has_web_search = "web_search" in tools
+
+    mandatory_lines: list[str] = []
+    if has_terminal or has_execute_code:
+        if has_terminal and has_execute_code:
+            mandatory_lines.append(
+                "- Arithmetic, math, calculations → use terminal or execute_code"
+            )
+        elif has_execute_code:
+            mandatory_lines.append(
+                "- Arithmetic, math, calculations → use execute_code"
+            )
+        else:
+            mandatory_lines.append(
+                "- Arithmetic, math, calculations → use terminal"
+            )
+    if has_terminal:
+        mandatory_lines.extend(
+            [
+                "- Hashes, encodings, checksums → use terminal (e.g. sha256sum, base64)",
+                "- Current time, date, timezone → use terminal (e.g. date)",
+                "- System state: OS, CPU, memory, disk, ports, processes → use terminal",
+                "- Git history, branches, diffs → use terminal",
+            ]
+        )
+    if has_file_read or has_terminal:
+        file_tools = []
+        if "read_file" in tools:
+            file_tools.append("read_file")
+        if "search_files" in tools:
+            file_tools.append("search_files")
+        if has_terminal:
+            file_tools.append("terminal")
+        mandatory_lines.append(
+            "- File contents, sizes, line counts → use " + ", ".join(file_tools)
+        )
+    if has_web_search:
+        mandatory_lines.append("- Current facts (weather, news, versions) → use web_search")
+
+    sections = [
+        "# Execution discipline\n"
+        "<tool_persistence>\n"
+        "- Use tools whenever they improve correctness, completeness, or grounding.\n"
+        "- Do not stop early if another tool call would materially improve the result.\n"
+        "- If a tool returns empty or partial results, retry with a different query or strategy.\n"
+        "- Keep calling tools until the task is complete and verified.\n"
+        "</tool_persistence>"
+    ]
+
+    if mandatory_lines:
+        sections.append(
+            "<mandatory_tool_use>\n"
+            "NEVER answer these from memory or mental computation — ALWAYS use a tool:\n"
+            + "\n".join(mandatory_lines)
+            + "\nMemory and user profile describe the USER, not the live system.\n"
+            "</mandatory_tool_use>"
+        )
+
+    if has_terminal:
+        sections.append(
+            "<act_dont_ask>\n"
+            "When a question has an obvious default interpretation, act immediately instead of asking. Examples:\n"
+            "- 'Is port 443 open?' → check THIS machine (don't ask 'open where?')\n"
+            "- 'What OS am I running?' → check the live system (don't use user profile)\n"
+            "- 'What time is it?' → run `date` (don't guess)\n"
+            "Only clarify when the ambiguity changes the tool to call.\n"
+            "</act_dont_ask>"
+        )
+    else:
+        sections.append(
+            "<act_dont_ask>\n"
+            "When a question has an obvious default interpretation, act immediately instead of asking.\n"
+            "Only clarify when the ambiguity changes the tool to call.\n"
+            "</act_dont_ask>"
+        )
+
+    sections.extend(
+        [
+            "<prerequisite_checks>\n"
+            "- Before acting, check whether prerequisite discovery, lookup, or context-gathering is needed.\n"
+            "- Do not skip prerequisite steps because the final action seems obvious.\n"
+            "- If a task depends on output from a prior step, resolve that dependency first.\n"
+            "</prerequisite_checks>",
+            "<verification>\n"
+            "Before finalizing your response:\n"
+            "- Correctness: does the output satisfy every stated requirement?\n"
+            "- Grounding: are factual claims backed by tool outputs or provided context?\n"
+            "- Formatting: does the output match the requested format or schema?\n"
+            "- Safety: if the next step has side effects (file writes, commands, API calls), "
+            "confirm scope before executing.\n"
+            "</verification>",
+            "<missing_context>\n"
+            "- If required context is missing, do NOT guess or hallucinate an answer.\n"
+            "- Use the appropriate lookup tool when the information is retrievable (search_files, web_search, read_file, etc.).\n"
+            "- Ask a clarifying question only when the information cannot be retrieved by tools.\n"
+            "- If you must proceed with incomplete information, label assumptions explicitly.\n"
+            "</missing_context>",
+        ]
+    )
+    return "\n\n".join(sections)
+
+
+def build_google_model_operational_guidance(
+    available_tools: Optional[Collection[str]] = None,
+) -> str:
+    """Return Gemini/Gemma operational guidance trimmed to available tools."""
+    tools = _normalize_tool_name_set(available_tools)
+    if not tools:
+        return GOOGLE_MODEL_OPERATIONAL_GUIDANCE
+
+    has_terminal = "terminal" in tools
+    has_file_read = bool({"read_file", "search_files"} & tools)
+
+    lines = ["# Google model operational directives"]
+    if has_file_read:
+        lines.extend(
+            [
+                "- **Absolute paths:** Use absolute paths for file operations.",
+                "- **Verify first:** Use read_file/search_files to inspect files and structure before editing.",
+            ]
+        )
+    if has_terminal:
+        lines.extend(
+            [
+                "- **Dependency checks:** Check package manifests before importing or installing.",
+                "- **Non-interactive commands:** Use flags like -y, --yes, or --non-interactive to avoid hangs.",
+            ]
+        )
+    lines.extend(
+        [
+            "- **Conciseness:** Keep explanations brief and action-focused.",
+            "- **Parallel tool calls:** Batch independent tool calls in one response.",
+            "- **Keep going:** Work autonomously until the task is fully resolved.",
+        ]
+    )
+    return "\n".join(lines)
+
 # Model name substrings that should use the 'developer' role instead of
 # 'system' for the system prompt.  OpenAI's newer models (GPT-5, Codex)
 # give stronger instruction-following weight to the 'developer' role.
@@ -626,19 +755,10 @@ DEVELOPER_ROLE_MODELS = ("gpt-5", "codex")
 
 PLATFORM_HINTS = {
     "whatsapp": (
-        "You are on a text messaging communication platform, WhatsApp. "
-        "Standard markdown (**bold**, *italic*, ~~strike~~, # headers, "
-        "`code`, ```code blocks```, [links](url)) is auto-converted to "
-        "WhatsApp's native syntax (*bold*, _italic_, ~strike~, monospace) — "
-        "feel free to write in markdown, and use bullet lists ('- item') "
-        "freely. Tables are NOT supported — prefer bullet lists or labeled "
-        "key:value pairs. "
-        "You can send media files natively: to deliver a file to the user, "
-        "include MEDIA:/absolute/path/to/file in your response. The file "
-        "will be sent as a native WhatsApp attachment — images (.jpg, .png, "
-        ".webp) appear as photos, videos (.mp4, .mov) play inline, and other "
-        "files arrive as downloadable documents. You can also include image "
-        "URLs in markdown format ![alt](url) and they will be sent as photos."
+        "You are on WhatsApp. Do not use markdown. To send a file, include "
+        "MEDIA:/absolute/path/to/file in your response. Images appear as photos, "
+        "videos play inline, other files arrive as documents, and ![alt](url) "
+        "image links are sent as photos."
     ),
     "whatsapp_cloud": (
         "You are on a text messaging communication platform, WhatsApp "
@@ -682,63 +802,41 @@ PLATFORM_HINTS = {
         "URLs in markdown format ![alt](url) and they will be sent as native photos."
     ),
     "discord": (
-        "You are in a Discord server or group chat communicating with your user. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
-        "in your response. Images (.png, .jpg, .webp) are sent as photo "
-        "attachments, audio as file attachments. You can also include image URLs "
-        "in markdown format ![alt](url) and they will be sent as attachments."
+        "You are in Discord. To send a file, include MEDIA:/absolute/path/to/file "
+        "in your response. Images are sent as photo attachments, audio as files, "
+        "and ![alt](url) image links are sent as attachments."
     ),
     "slack": (
-        "You are in a Slack workspace communicating with your user. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
-        "in your response. Images (.png, .jpg, .webp) are uploaded as photo "
-        "attachments, audio as file attachments. You can also include image URLs "
-        "in markdown format ![alt](url) and they will be uploaded as attachments."
+        "You are in Slack. To send a file, include MEDIA:/absolute/path/to/file "
+        "in your response. Images upload as photo attachments, audio as files, "
+        "and ![alt](url) image links upload as attachments."
     ),
     "signal": (
-        "You are on a text messaging communication platform, Signal. "
-        "Standard markdown (**bold**, *italic*, ~~strike~~, # headers, "
-        "`code`, ```code blocks```) is auto-converted to Signal's native "
-        "rich formatting — feel free to write in markdown, and use bullet "
-        "lists ('- item') freely (they render as • bullets). Tables are NOT "
-        "supported — prefer bullet lists or labeled key:value pairs. "
-        "You can send media files natively: to deliver a file to the user, "
-        "include MEDIA:/absolute/path/to/file in your response. Images "
-        "(.png, .jpg, .webp) appear as photos, audio as attachments, and other "
-        "files arrive as downloadable documents. You can also include image "
-        "URLs in markdown format ![alt](url) and they will be sent as photos."
+        "You are on Signal. Do not use markdown. To send a file, include "
+        "MEDIA:/absolute/path/to/file in your response. Images appear as photos, "
+        "audio as attachments, other files as documents, and ![alt](url) image "
+        "links are sent as photos."
     ),
     "email": (
-        "You are communicating via email. Write clear, well-structured responses "
-        "suitable for email. Use plain text formatting (no markdown). "
-        "Keep responses concise but complete. You can send file attachments — "
-        "include MEDIA:/absolute/path/to/file in your response. The subject line "
-        "is preserved for threading. Do not include greetings or sign-offs unless "
-        "contextually appropriate."
+        "You are communicating by email. Use plain text, keep replies concise but complete, "
+        "and include MEDIA:/absolute/path/to/file to send attachments. The subject line is "
+        "preserved for threading. Skip greetings or sign-offs unless context calls for them."
     ),
     "cron": (
-        "You are running as a scheduled cron job. There is no user present — you "
-        "cannot ask questions, request clarification, or wait for follow-up. Execute "
-        "the task fully and autonomously, making reasonable decisions where needed. "
-        "Your final response is automatically delivered to the job's configured "
-        "destination — put the primary content directly in your response."
+        "You are running as a cron job. No user is present, so you cannot ask questions "
+        "or wait for follow-up. Execute autonomously, make reasonable decisions, and put "
+        "the primary user-facing content directly in your response because it is auto-delivered."
     ),
     "cli": (
-        "You are a CLI AI Agent. Try not to use markdown but simple text "
-        "renderable inside a terminal. "
-        "File delivery: there is no attachment channel — the user reads your "
-        "response directly in their terminal. Do NOT emit MEDIA:/path tags "
-        "(those are only intercepted on messaging platforms like Telegram, "
-        "Discord, Slack, etc.; on the CLI they render as literal text). "
-        "When referring to a file you created or changed, just state its "
-        "absolute path in plain text; the user can open it from there. "
-        "Cron jobs scheduled from this session are LOCAL-ONLY: their output is "
-        "saved (viewable via cronjob action='list') but is NOT delivered back "
-        "into this terminal — there is no live-delivery channel here. If the "
-        "user wants to be notified when a job runs, the job's `deliver` must "
-        "target a gateway-connected messaging platform (e.g. deliver='telegram' "
-        "or 'all'). Do not promise the user that a deliver='origin' or "
-        "default-deliver cron job will message them in this session."
+        "You are a CLI AI Agent. Prefer simple terminal-friendly text over markdown. "
+        "There is no attachment channel, so do NOT emit MEDIA:/path tags; on the CLI they "
+        "render as literal text. When you create or change a file, state its absolute path plainly. "
+        "Cron jobs scheduled from this session are LOCAL-ONLY: their output is saved "
+        "(viewable via cronjob action='list') but is NOT delivered back into this terminal — "
+        "there is no live-delivery channel here. If the user wants to be notified when a job runs, "
+        "the job's `deliver` must target a gateway-connected messaging platform (e.g. deliver='telegram' "
+        "or 'all'). Do not promise the user that a deliver='origin' or default-deliver cron job will "
+        "message them in this session."
     ),
     "tui": (
         "You are running in the Hermes terminal UI (TUI). "
@@ -763,30 +861,19 @@ PLATFORM_HINTS = {
         ".heic) appear as photos and other files arrive as attachments."
     ),
     "mattermost": (
-        "You are in a Mattermost workspace communicating with your user. "
-        "Mattermost renders standard Markdown — headings, bold, italic, code "
-        "blocks, and tables all work. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
-        "in your response. Images (.jpg, .png, .webp) are uploaded as photo "
-        "attachments, audio and video as file attachments. "
-        "Image URLs in markdown format ![alt](url) are rendered as inline previews automatically."
+        "You are in Mattermost. Standard Markdown works, including tables. To send a file, "
+        "include MEDIA:/absolute/path/to/file in your response. Images upload as photos, audio "
+        "and video as files, and ![alt](url) image links render as inline previews."
     ),
     "matrix": (
-        "You are in a Matrix room communicating with your user. "
-        "Matrix renders Markdown — bold, italic, code blocks, and links work; "
-        "the adapter converts your Markdown to HTML for rich display. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
-        "in your response. Images (.jpg, .png, .webp) are sent as inline photos, "
-        "audio (.ogg, .mp3) as voice/audio messages, video (.mp4) inline, "
-        "and other files as downloadable attachments."
+        "You are in Matrix. Markdown works and is converted to rich display. To send a file, "
+        "include MEDIA:/absolute/path/to/file in your response. Images send inline, audio as "
+        "voice/audio messages, video inline, and other files as attachments."
     ),
     "feishu": (
-        "You are in a Feishu (Lark) workspace communicating with your user. "
-        "Feishu renders Markdown in messages — bold, italic, code blocks, and "
-        "links are supported. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
-        "in your response. Images (.jpg, .png, .webp) are uploaded and displayed "
-        "inline, audio files as voice messages, and other files as attachments."
+        "You are in Feishu (Lark). Markdown works. To send a file, include "
+        "MEDIA:/absolute/path/to/file in your response. Images display inline, audio "
+        "as voice messages, and other files as attachments."
     ),
     "weixin": (
         "You are on Weixin/WeChat. Markdown formatting is supported, so you may use it when "
@@ -838,10 +925,8 @@ PLATFORM_HINTS = {
         "— when a sticker is the right response, use yb_send_sticker."
     ),
     "api_server": (
-        "You're responding through an API server. The rendering layer is unknown — "
-        "assume plain text. No markdown formatting (no asterisks, bullets, headers, "
-        "code fences). Treat this like a conversation, not a document. Keep responses "
-        "brief and natural."
+        "You're responding through an API server. The rendering layer is unknown, so assume plain text. "
+        "No markdown formatting. Treat this like a conversation, not a document, and keep responses brief."
     ),
     "webui": (
         "You are in the Hermes WebUI, a browser-based chat interface. "
@@ -857,6 +942,50 @@ PLATFORM_HINTS = {
     ),
 }
 
+
+_PLATFORM_HINTS_NO_MEDIA = {
+    "whatsapp": "You are on WhatsApp. Do not use markdown.",
+    "telegram": (
+        "You are on Telegram. Standard markdown renders: **bold**, *italic*, "
+        "~~strikethrough~~, ||spoiler||, `code`, ```blocks```, [links](url), and ## headers. "
+        "Telegram has no table syntax, so prefer bullets or key: value lists."
+    ),
+    "discord": "You are in Discord.",
+    "slack": "You are in Slack.",
+    "signal": "You are on Signal. Do not use markdown.",
+    "mattermost": "You are in Mattermost. Standard Markdown works, including tables.",
+    "matrix": "You are in Matrix. Markdown works and is converted to rich display.",
+    "feishu": "You are in Feishu (Lark). Markdown works.",
+}
+
+
+def _tools_can_emit_media(available_tools: Optional[Collection[str]]) -> bool:
+    tools = _normalize_tool_name_set(available_tools)
+    if not tools:
+        return False
+    if tools & _MEDIA_OUTPUT_TOOL_NAMES:
+        return True
+    return any(
+        name.startswith(("image_", "video_", "audio_"))
+        for name in tools
+    )
+
+
+def build_platform_hint(
+    platform_key: str,
+    available_tools: Optional[Collection[str]] = None,
+) -> str:
+    """Return platform guidance, trimming media instructions when useless."""
+    key = (platform_key or "").lower().strip()
+    if not key:
+        return ""
+    hint = PLATFORM_HINTS.get(key, "")
+    if not hint:
+        return ""
+    if key in _PLATFORM_HINTS_NO_MEDIA and not _tools_can_emit_media(available_tools):
+        return _PLATFORM_HINTS_NO_MEDIA[key]
+    return hint
+
 # ---------------------------------------------------------------------------
 # Environment hints — execution-environment awareness for the agent.
 # Unlike PLATFORM_HINTS (which describe the messaging channel), these describe
@@ -864,14 +993,10 @@ PLATFORM_HINTS = {
 # ---------------------------------------------------------------------------
 
 WSL_ENVIRONMENT_HINT = (
-    "You are running inside WSL (Windows Subsystem for Linux). "
-    "The Windows host filesystem is mounted under /mnt/ — "
-    "/mnt/c/ is the C: drive, /mnt/d/ is D:, etc. "
-    "The user's Windows files are typically at "
-    "/mnt/c/Users/<username>/Desktop/, Documents/, Downloads/, etc. "
-    "When the user references Windows paths or desktop files, translate "
-    "to the /mnt/c/ equivalent. You can list /mnt/c/Users/ to discover "
-    "the Windows username if needed."
+    "You are running inside WSL. The Windows filesystem is mounted under /mnt/ "
+    "(/mnt/c/ for C:, /mnt/d/ for D:). User files are typically under "
+    "/mnt/c/Users/<username>/. When the user references Windows paths or desktop files, "
+    "translate them to the /mnt/c/ equivalent. You can list /mnt/c/Users/ to find the username."
 )
 
 
@@ -1134,22 +1259,6 @@ def build_environment_hints() -> str:
                 f"`uname -a && whoami && pwd`."
             )
 
-    # Hermes desktop GUI — any agent running under the desktop app should know
-    # it. HERMES_DESKTOP marks the backend powering the chat; HERMES_DESKTOP_TERMINAL
-    # marks a hermes launched in the embedded terminal pane. Both set by main.cjs.
-    _truthy = ("1", "true", "yes")
-    _in_desktop = (os.getenv("HERMES_DESKTOP") or "").strip().lower() in _truthy
-    _in_desktop_term = (os.getenv("HERMES_DESKTOP_TERMINAL") or "").strip().lower() in _truthy
-    if _in_desktop or _in_desktop_term:
-        _desktop_hint = "Runtime surface: you're running inside the Hermes desktop GUI app."
-        if _in_desktop_term:
-            _desktop_hint += (
-                " You're in its embedded terminal pane, beside the GUI chat — the user can "
-                "select your output (⌥-drag on macOS, Shift-drag elsewhere) and press "
-                "⌘/Ctrl+L to send it to the chat composer."
-            )
-        hints.append(_desktop_hint)
-
     if is_wsl():
         hints.append(WSL_ENVIRONMENT_HINT)
 
@@ -1262,7 +1371,16 @@ def drain_truncation_warnings() -> list:
 _SKILLS_PROMPT_CACHE_MAX = 8
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
-_SKILLS_SNAPSHOT_VERSION = 1
+_SKILLS_SNAPSHOT_VERSION = 2
+_SKILL_QUERY_STOPWORDS = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+        "help", "how", "i", "if", "in", "into", "is", "it", "me", "my",
+        "of", "on", "or", "please", "set", "setup", "that", "the", "this",
+        "to", "up", "use", "using", "want", "with",
+    }
+)
+_DEFAULT_SKILL_CANDIDATE_LIMIT = 8
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -1350,6 +1468,12 @@ def _build_snapshot_entry(
     if isinstance(platforms, str):
         platforms = [platforms]
 
+    metadata = frontmatter.get("metadata") if isinstance(frontmatter.get("metadata"), dict) else {}
+    hermes_metadata = metadata.get("hermes") if isinstance(metadata.get("hermes"), dict) else {}
+    tags = hermes_metadata.get("tags") or []
+    if isinstance(tags, str):
+        tags = [tags]
+
     return {
         "skill_name": skill_name,
         "category": category,
@@ -1357,7 +1481,120 @@ def _build_snapshot_entry(
         "description": description,
         "platforms": [str(p).strip() for p in platforms if str(p).strip()],
         "conditions": extract_skill_conditions(frontmatter),
+        "tags": [str(tag).strip() for tag in tags if str(tag).strip()],
     }
+
+
+def _normalize_skill_query_terms(text: str) -> list[str]:
+    normalized = re.sub(r"[^a-z0-9]+", " ", (text or "").lower())
+    return [
+        term
+        for term in normalized.split()
+        if len(term) >= 2 and term not in _SKILL_QUERY_STOPWORDS
+    ]
+
+
+def _score_skill_entry(entry: dict, query_terms: list[str], normalized_query: str) -> int:
+    if not query_terms:
+        return 0
+
+    name = str(entry.get("frontmatter_name") or entry.get("skill_name") or "")
+    category = str(entry.get("category") or "")
+    description = str(entry.get("description") or "")
+    tags = [str(tag) for tag in (entry.get("tags") or [])]
+
+    norm_name = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+    norm_category = re.sub(r"[^a-z0-9]+", " ", category.lower()).strip()
+    norm_description = re.sub(r"[^a-z0-9]+", " ", description.lower()).strip()
+    norm_tags = [re.sub(r"[^a-z0-9]+", " ", tag.lower()).strip() for tag in tags]
+    combined = " ".join(part for part in [norm_name, norm_category, norm_description, *norm_tags] if part)
+
+    score = 0
+    if norm_name and norm_name in normalized_query:
+        score += 25
+    compact_name = norm_name.replace(" ", "")
+    compact_query = normalized_query.replace(" ", "")
+    if compact_name and compact_name in compact_query:
+        score += 20
+
+    for term in query_terms:
+        if term in norm_name:
+            score += 8
+        if term in norm_category:
+            score += 5
+        if term in norm_description:
+            score += 3
+        if any(term in tag for tag in norm_tags):
+            score += 6
+
+    matched_terms = sum(1 for term in query_terms if term in combined)
+    if matched_terms:
+        score += matched_terms * 2
+    if matched_terms == len(query_terms):
+        score += 8
+
+    return score
+
+
+def _select_skill_candidates(
+    skill_entries: list[dict],
+    query: str,
+    *,
+    limit: int = _DEFAULT_SKILL_CANDIDATE_LIMIT,
+) -> list[dict]:
+    query_terms = _normalize_skill_query_terms(query)
+    normalized_query = re.sub(r"[^a-z0-9]+", " ", (query or "").lower()).strip()
+    if not query_terms:
+        return []
+
+    ranked: list[tuple[int, str, str, dict]] = []
+    for entry in skill_entries:
+        score = _score_skill_entry(entry, query_terms, normalized_query)
+        if score <= 0:
+            continue
+        ranked.append(
+            (
+                score,
+                str(entry.get("category") or ""),
+                str(entry.get("frontmatter_name") or entry.get("skill_name") or ""),
+                entry,
+            )
+        )
+
+    ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return [entry for _score, _cat, _name, entry in ranked[:limit]]
+
+
+def _render_skill_entries_by_category(
+    skill_entries: list[dict],
+    category_descriptions: dict[str, str],
+    *,
+    names_only: bool = False,
+) -> list[str]:
+    skills_by_category: dict[str, list[tuple[str, str]]] = {}
+    for entry in skill_entries:
+        category = str(entry.get("category") or "general")
+        name = str(entry.get("frontmatter_name") or entry.get("skill_name") or "")
+        desc = str(entry.get("description") or "")
+        skills_by_category.setdefault(category, []).append((name, desc))
+
+    index_lines = []
+    for category in sorted(skills_by_category.keys()):
+        cat_desc = category_descriptions.get(category, "")
+        if cat_desc:
+            index_lines.append(f"  {category}: {cat_desc}")
+        else:
+            index_lines.append(f"  {category}:")
+        seen = set()
+        for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
+            if name in seen:
+                continue
+            seen.add(name)
+            if not names_only and desc:
+                index_lines.append(f"    - {name}: {desc}")
+            else:
+                index_lines.append(f"    - {name}")
+    return index_lines
 
 
 # =========================================================================
@@ -1424,12 +1661,13 @@ def _skill_should_show(
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
-    compact_categories: "frozenset[str] | None" = None,
+    query: str | None = None,
+    candidate_limit: int = _DEFAULT_SKILL_CANDIDATE_LIMIT,
 ) -> str:
     """Build a compact skill index for the system prompt.
 
     Two-layer cache:
-      1. In-process LRU dict keyed by (skills_dir, tools, toolsets, hidden)
+      1. In-process LRU dict keyed by (skills_dir, tools, toolsets)
       2. Disk snapshot (``.skills_prompt_snapshot.json``) validated by
          mtime/size manifest — survives process restarts
 
@@ -1439,12 +1677,6 @@ def build_skills_system_prompt(
     scanned alongside the local ``~/.hermes/skills/`` directory.  External dirs
     are read-only — they appear in the index but new skills are always created
     in the local dir.  Local skills take precedence when names collide.
-
-    ``compact_categories`` (e.g. from the coding posture — see
-    agent/coding_context.py) demotes whole categories to a names-only line in
-    the rendered index. Nothing is ever hidden: every skill name stays
-    visible and loadable via ``skill_view`` / ``skills_list``; only the
-    descriptions are dropped, and a footer note explains the demotion.
     """
     skills_dir = get_skills_dir()
     external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
@@ -1469,7 +1701,8 @@ def build_skills_system_prompt(
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,
         tuple(sorted(disabled)),
-        tuple(sorted(compact_categories or ())),
+        (query or "").strip().lower(),
+        int(candidate_limit),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1482,6 +1715,7 @@ def build_skills_system_prompt(
 
     skills_by_category: dict[str, list[tuple[str, str]]] = {}
     category_descriptions: dict[str, str] = {}
+    available_skill_entries: list[dict] = []
 
     if snapshot is not None:
         # Fast path: use pre-parsed metadata from disk
@@ -1502,6 +1736,7 @@ def build_skills_system_prompt(
                 available_toolsets,
             ):
                 continue
+            available_skill_entries.append(entry)
             skills_by_category.setdefault(category, []).append(
                 (frontmatter_name, entry.get("description", ""))
             )
@@ -1527,6 +1762,7 @@ def build_skills_system_prompt(
                 available_toolsets,
             ):
                 continue
+            available_skill_entries.append(entry)
             skills_by_category.setdefault(entry["category"], []).append(
                 (entry["frontmatter_name"], entry["description"])
             )
@@ -1583,6 +1819,7 @@ def build_skills_system_prompt(
                 ):
                     continue
                 seen_skill_names.add(frontmatter_name)
+                available_skill_entries.append(entry)
                 skills_by_category.setdefault(entry["category"], []).append(
                     (frontmatter_name, entry["description"])
                 )
@@ -1603,82 +1840,90 @@ def build_skills_system_prompt(
             except Exception as e:
                 logger.debug("Could not read external skill description %s: %s", desc_file, e)
 
-    # Posture-driven category demotion (e.g. non-coding skills while pairing
-    # on code). Demoted categories stay in the index as a single names-only
-    # line — descriptions are dropped to cut noise, but every skill name
-    # remains visible so memory-anchored recall ("load <name>") keeps working.
-    # NEVER remove entries entirely: agent-created skills are the model's
-    # project memory, and models don't reach for skills_list to rediscover
-    # what the index stops showing them. Match on the top-level category
-    # segment so nested categories ("social-media/twitter") are demoted with
-    # their parent.
-    demoted = frozenset(
-        cat for cat in skills_by_category
-        if cat.split("/", 1)[0] in (compact_categories or frozenset())
-    )
-
-    hidden_note = ""
-    if demoted:
-        hidden_note = (
-            "\n(Categories marked [names only] are outside the current coding "
-            "context, so their descriptions are omitted — the skills work "
-            "normally and load with skill_view(name) as usual.)"
-        )
-
     if not skills_by_category:
         result = ""
     else:
-        index_lines = []
-        for category in sorted(skills_by_category.keys()):
-            # Deduplicate and sort skills within each category
-            seen = set()
-            if category in demoted:
-                names = sorted({name for name, _ in skills_by_category[category]})
-                index_lines.append(f"  {category} [names only]: {', '.join(names)}")
-                continue
-            cat_desc = category_descriptions.get(category, "")
-            if cat_desc:
-                index_lines.append(f"  {category}: {cat_desc}")
+        query = (query or "").strip()
+        if query:
+            selected_entries = _select_skill_candidates(
+                available_skill_entries,
+                query,
+                limit=max(1, int(candidate_limit)),
+            )
+            if selected_entries:
+                index_lines = _render_skill_entries_by_category(
+                    selected_entries,
+                    category_descriptions,
+                )
+                result = (
+                    "## Skills (mandatory)\n"
+                    "Use the current user request to choose from the candidate skills below. "
+                    "If a skill matches or is even partially relevant, you MUST load it with "
+                    "skill_view(name) and follow its instructions. The full skill catalog is omitted "
+                    "here to conserve tokens; if none of these candidates fit, call skills_list() "
+                    "before proceeding without a skill.\n"
+                    "Whenever the user asks you to configure, set up, install, enable, disable, "
+                    "modify, or troubleshoot Hermes Agent itself — its CLI, config, models, providers, "
+                    "tools, skills, voice, gateway, plugins, or any feature — load the `hermes-agent` "
+                    "skill first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`, "
+                    "`hermes setup`) so you don't have to guess or invent workarounds.\n"
+                    "If a skill has issues, fix it with skill_manage(action='patch').\n"
+                    "\n"
+                    "<candidate_skills>\n"
+                    + "\n".join(index_lines) + "\n"
+                    "</candidate_skills>\n"
+                    "\n"
+                    "Only proceed without loading a skill if genuinely none are relevant."
+                )
             else:
-                index_lines.append(f"  {category}:")
-            for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
-                if name in seen:
-                    continue
-                seen.add(name)
-                if desc:
-                    index_lines.append(f"    - {name}: {desc}")
-                else:
-                    index_lines.append(f"    - {name}")
-
-        result = (
-            "## Skills (mandatory)\n"
-            "Before replying, scan the skills below. If a skill matches or is even partially relevant "
-            "to your task, you MUST load it with skill_view(name) and follow its instructions. "
-            "Err on the side of loading — it is always better to have context you don't need "
-            "than to miss critical steps, pitfalls, or established workflows. "
-            "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
-            "and proven workflows that outperform general-purpose approaches. Load the skill "
-            "even if you think you could handle the task with basic tools like web_search or terminal. "
-            "Skills also encode the user's preferred approach, conventions, and quality standards "
-            "for tasks like code review, planning, and testing — load them even for tasks you "
-            "already know how to do, because the skill defines how it should be done here.\n"
-            "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
-            "or troubleshoot Hermes Agent itself — its CLI, config, models, providers, tools, "
-            "skills, voice, gateway, plugins, or any feature — load the `hermes-agent` skill "
-            "first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`, "
-            "`hermes setup`) so you don't have to guess or invent workarounds.\n"
-            "If a skill has issues, fix it with skill_manage(action='patch').\n"
-            "After difficult/iterative tasks, offer to save as a skill. "
-            "If a skill you loaded was missing steps, had wrong commands, or needed "
-            "pitfalls you discovered, update it before finishing.\n"
-            "\n"
-            "<available_skills>\n"
-            + "\n".join(index_lines) + "\n"
-            "</available_skills>\n"
-            "\n"
-            "Only proceed without loading a skill if genuinely none are relevant to the task."
-            + hidden_note
-        )
+                index_lines = _render_skill_entries_by_category(
+                    available_skill_entries,
+                    category_descriptions,
+                    names_only=True,
+                )
+                result = (
+                    "## Skills (mandatory)\n"
+                    "No high-confidence skill matches were preselected for the current request. "
+                    "Use the compact catalog below to decide whether to call skill_view(name), or call "
+                    "skills_list() for the full metadata-rich catalog before proceeding without a skill.\n"
+                    "\n"
+                    "<available_skills>\n"
+                    + "\n".join(index_lines) + "\n"
+                    "</available_skills>\n"
+                )
+        else:
+            index_lines = _render_skill_entries_by_category(
+                available_skill_entries,
+                category_descriptions,
+            )
+            result = (
+                "## Skills (mandatory)\n"
+                "Before replying, scan the skills below. If a skill matches or is even partially relevant "
+                "to your task, you MUST load it with skill_view(name) and follow its instructions. "
+                "Err on the side of loading — it is always better to have context you don't need "
+                "than to miss critical steps, pitfalls, or established workflows. "
+                "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
+                "and proven workflows that outperform general-purpose approaches. Load the skill "
+                "even if you think you could handle the task with basic tools like web_search or terminal. "
+                "Skills also encode the user's preferred approach, conventions, and quality standards "
+                "for tasks like code review, planning, and testing — load them even for tasks you "
+                "already know how to do, because the skill defines how it should be done here.\n"
+                "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
+                "or troubleshoot Hermes Agent itself — its CLI, config, models, providers, tools, "
+                "skills, voice, gateway, plugins, or any feature — load the `hermes-agent` skill "
+                "first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`, "
+                "`hermes setup`) so you don't have to guess or invent workarounds.\n"
+                "If a skill has issues, fix it with skill_manage(action='patch').\n"
+                "After difficult/iterative tasks, offer to save as a skill. "
+                "If a skill you loaded was missing steps, had wrong commands, or needed "
+                "pitfalls you discovered, update it before finishing.\n"
+                "\n"
+                "<available_skills>\n"
+                + "\n".join(index_lines) + "\n"
+                "</available_skills>\n"
+                "\n"
+                "Only proceed without loading a skill if genuinely none are relevant to the task."
+            )
 
     # ── Store in LRU cache ────────────────────────────────────────────
     with _SKILLS_PROMPT_CACHE_LOCK:
@@ -1741,13 +1986,13 @@ def build_nous_subscription_prompt(valid_tool_names: "set[str] | None" = None) -
 
     lines = [
         "# Nous Subscription",
-        "Nous subscription includes managed web tools (Firecrawl), image generation (FAL), OpenAI TTS, OpenAI Whisper STT, and browser automation (Browser Use) by default. Modal execution is optional.",
+        "Nous subscription includes managed web tools (Firecrawl), image generation (FAL), OpenAI TTS, and browser automation (Browser Use) by default. Modal execution is optional.",
         "Current capability status:",
     ]
     lines.extend(_status_line(feature) for feature in features.items())
     lines.extend(
         [
-            "When a Nous-managed feature is active, do not ask the user for Firecrawl, FAL, OpenAI TTS, OpenAI Whisper, or Browser-Use API keys.",
+            "When a Nous-managed feature is active, do not ask the user for Firecrawl, FAL, OpenAI TTS, or Browser-Use API keys.",
             "If the user is not subscribed and asks for a capability that Nous subscription would unlock or simplify, suggest Nous subscription as one option alongside direct setup or local alternatives.",
             "Do not mention subscription unless the user asks about it or it directly solves the current missing capability.",
             "Useful commands: hermes setup, hermes setup tools, hermes setup terminal, hermes status.",
@@ -1975,4 +2220,4 @@ def build_context_files_prompt(
 
     if not sections:
         return ""
-    return "# Project Context\n\nThe following project context files have been loaded and should be followed:\n\n" + "\n".join(sections)
+    return "# Project Context\n\nFollow the loaded project context files below:\n\n" + "\n".join(sections)
