@@ -288,13 +288,13 @@ def _pid_from_record(record: Optional[dict[str, Any]]) -> Optional[int]:
 
 
 def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
-    """Delete a stale gateway PID file (and its sibling lock metadata).
+    """Delete stale gateway runtime metadata after liveness checks fail.
 
     Called from ``get_running_pid()`` after the runtime lock has already been
     confirmed inactive, so the on-disk metadata is known to belong to a dead
-    process.  Unlike ``remove_pid_file()`` (which defensively refuses to delete
+    process. Unlike ``remove_pid_file()`` (which defensively refuses to delete
     a PID file whose ``pid`` field differs from ``os.getpid()`` to protect
-    ``--replace`` handoffs), this path force-unlinks both files so the next
+    ``--replace`` handoffs), this path force-unlinks stale metadata so the next
     startup sees a clean slate.
     """
     if not cleanup_stale:
@@ -305,6 +305,12 @@ def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
         pass
     try:
         _get_gateway_lock_path(pid_path).unlink(missing_ok=True)
+    except Exception:
+        pass
+    if pid_path != _get_pid_path():
+        return
+    try:
+        _get_runtime_status_path().unlink(missing_ok=True)
     except Exception:
         pass
 
