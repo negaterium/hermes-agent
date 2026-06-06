@@ -139,17 +139,29 @@ from agent.model_metadata import (
     estimate_request_tokens_rough,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.estimate_request_tokens_rough")
     is_local_endpoint,
 )
-from agent.usage_pricing import normalize_usage
+from agent.usage_pricing import estimate_usage_cost, normalize_usage
 # Re-exported for tests that monkeypatch these symbols on run_agent.
 from agent.context_compressor import ContextCompressor  # noqa: F401
+from agent.subdirectory_hints import SubdirectoryHintTracker
+from agent.prompt_caching import apply_anthropic_cache_control
 from agent.retry_utils import jittered_backoff  # noqa: F401
 from agent.prompt_builder import (  # noqa: F401  # re-exported via _ra() / mock.patch("run_agent.<name>") / from run_agent import <name>
     DEFAULT_AGENT_IDENTITY,
+    MEMORY_GUIDANCE,
+    SESSION_SEARCH_GUIDANCE,
+    SKILLS_GUIDANCE,
+    HERMES_AGENT_HELP_GUIDANCE,
+    KANBAN_GUIDANCE,
     build_skills_system_prompt,
     build_context_files_prompt,
     build_environment_hints,
+    build_platform_hint,
     build_nous_subscription_prompt,
     load_soul_md,
+    TOOL_USE_ENFORCEMENT_GUIDANCE,
+    TOOL_USE_ENFORCEMENT_MODELS,
+    build_google_model_operational_guidance,
+    build_openai_model_execution_guidance,
 )
 from agent.process_bootstrap import _get_proxy_from_env  # noqa: F401
 from agent.message_sanitization import (  # noqa: F401
@@ -197,6 +209,95 @@ from agent.tool_dispatch_helpers import (
     _trajectory_normalize_msg,  # noqa: F401  # re-exported for tests that `from run_agent import _trajectory_normalize_msg`
 )
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname, is_truthy_value, model_forces_max_completion_tokens
+
+
+_TOOL_QUERY_STOPWORDS = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "best", "by", "do",
+        "for", "from", "go", "help", "how", "i", "if", "in", "into",
+        "is", "it", "me", "my", "of", "on", "or", "please", "should",
+        "tell", "that", "the", "this", "to", "use", "using", "we",
+        "what", "with", "you",
+    }
+)
+
+_TOOL_ALWAYS_KEEP = frozenset(
+    {
+        "clarify",
+        "memory",
+        "read_file",
+        "search_files",
+        "skill_view",
+        "skills_list",
+        "todo",
+    }
+)
+
+_TOOL_QUERY_KEYWORDS = {
+    "browser": (
+        "browser", "click", "fill", "form", "iframe", "login", "navigate",
+        "page", "screenshot", "scroll", "site", "website",
+    ),
+    "clarify": ("clarify", "question", "unsure"),
+    "code_execution": (
+        "calculate", "calculation", "compute", "csv", "json", "loop",
+        "math", "parse", "python", "script",
+    ),
+    "cronjob": (
+        "alert", "cron", "daily", "every", "hourly", "monitor", "recurring",
+        "remind", "reminder", "schedule", "weekly",
+    ),
+    "delegation": (
+        "agents", "compare", "parallel", "research", "subagent", "subagents",
+        "synthesize",
+    ),
+    "file": (
+        "code", "diff", "edit", "file", "line", "module", "path", "repo",
+        "repository", "search", "source", "write",
+    ),
+    "homeassistant": (
+        "climate", "device", "entity", "ha", "home assistant", "light",
+        "lock", "sensor", "switch", "thermostat",
+    ),
+    "image_gen": ("diagram", "draw", "image", "logo", "picture"),
+    "knowledge": ("knowledge", "note", "notes", "obsidian", "vault"),
+    "memory": ("memory", "remember"),
+    "messaging": ("deliver", "discord", "email", "message", "send", "slack", "telegram", "sms"),
+    "moa": ("hard", "hardest", "proof", "rigorous", "very difficult"),
+    "session_search": ("before", "last time", "past", "previous", "recall", "session"),
+    "skills": (
+        "configure", "gateway", "hermes", "install", "model", "provider",
+        "setup", "skill", "troubleshoot",
+    ),
+    "terminal": (
+        "bash", "build", "command", "container", "docker", "git", "install",
+        "log", "logs", "port", "process", "pty", "pytest", "run", "server",
+        "shell", "terminal", "test",
+    ),
+    "tts": ("audio", "read aloud", "speech", "speak", "tts", "voice"),
+    "web": ("api docs", "docs", "internet", "news", "search", "url", "web", "website"),
+}
+
+_INITIAL_TOOL_SCHEMA_LIMIT = 12
+
+_TOOLSET_BUNDLES = {
+    "browser": {"browser"},
+    "code_execution": {"code_execution"},
+    "cronjob": {"cronjob"},
+    "delegation": {"delegation"},
+    "file": {"file"},
+    "homeassistant": {"homeassistant"},
+    "image_gen": {"image_gen"},
+    "knowledge": {"knowledge"},
+    "memory": {"memory"},
+    "messaging": {"messaging"},
+    "moa": {"moa"},
+    "session_search": {"session_search"},
+    "skills": {"skills"},
+    "terminal": {"terminal"},
+    "tts": {"tts"},
+    "web": {"web", "search"},
+}
 
 
 
@@ -486,6 +587,673 @@ class AIAgent:
             checkpoint_max_file_size_mb=checkpoint_max_file_size_mb,
             pass_session_id=pass_session_id,
         )
+        
+        # Show tool configuration and store valid tool names for validation
+        self.valid_tool_names = set()
+        if self.tools:
+            self.valid_tool_names = {tool["function"]["name"] for tool in self.tools}
+            tool_names = sorted(self.valid_tool_names)
+            if not self.quiet_mode:
+                print(f"🛠️  Loaded {len(self.tools)} tools: {', '.join(tool_names)}")
+                
+                # Show filtering info if applied
+                if enabled_toolsets:
+                    print(f"   ✅ Enabled toolsets: {', '.join(enabled_toolsets)}")
+                if disabled_toolsets:
+                    print(f"   ❌ Disabled toolsets: {', '.join(disabled_toolsets)}")
+        elif not self.quiet_mode:
+            print("🛠️  No tools loaded (all tools filtered out or unavailable)")
+        
+        # Check tool requirements
+        if self.tools and not self.quiet_mode:
+            requirements = check_toolset_requirements()
+            missing_reqs = [name for name, available in requirements.items() if not available]
+            if missing_reqs:
+                print(f"⚠️  Some tools may not work due to missing requirements: {missing_reqs}")
+        
+        # Show trajectory saving status
+        if self.save_trajectories and not self.quiet_mode:
+            print("📝 Trajectory saving enabled")
+        
+        # Show ephemeral system prompt status
+        if self.ephemeral_system_prompt and not self.quiet_mode:
+            prompt_preview = self.ephemeral_system_prompt[:60] + "..." if len(self.ephemeral_system_prompt) > 60 else self.ephemeral_system_prompt
+            print(f"🔒 Ephemeral system prompt: '{prompt_preview}' (not saved to trajectories)")
+        
+        # Show prompt caching status
+        if self._use_prompt_caching and not self.quiet_mode:
+            if self._use_native_cache_layout and self.provider == "anthropic":
+                source = "native Anthropic"
+            elif self._use_native_cache_layout:
+                source = "Anthropic-compatible endpoint"
+            else:
+                source = "Claude via OpenRouter"
+            print(f"💾 Prompt caching: ENABLED ({source}, {self._cache_ttl} TTL)")
+        
+        # Session logging setup - auto-save conversation trajectories for debugging
+        self.session_start = datetime.now()
+        if session_id:
+            # Use provided session ID (e.g., from CLI)
+            self.session_id = session_id
+        else:
+            # Generate a new session ID
+            timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
+            short_uuid = uuid.uuid4().hex[:6]
+            self.session_id = f"{timestamp_str}_{short_uuid}"
+
+        # Expose session ID to tools (terminal, execute_code) so agents can
+        # reference their own session for --resume commands, cross-session
+        # coordination, and logging.  Uses the ContextVar system from
+        # session_context.py for concurrency safety (gateway runs multiple
+        # sessions in one process).  Also writes os.environ as fallback for
+        # CLI mode where ContextVars aren't used.
+        os.environ["HERMES_SESSION_ID"] = self.session_id
+        try:
+            from gateway.session_context import _SESSION_ID
+            _SESSION_ID.set(self.session_id)
+        except Exception:
+            pass  # CLI/test mode — ContextVar not needed
+
+        # Session logs go into ~/.hermes/sessions/ alongside gateway sessions
+        hermes_home = get_hermes_home()
+        self.logs_dir = hermes_home / "sessions"
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
+        
+        # Track conversation messages for session logging
+        self._session_messages: List[Dict[str, Any]] = []
+        self._memory_write_origin = "assistant_tool"
+        self._memory_write_context = "foreground"
+        
+        # Cached system prompt -- built once per session, only rebuilt on compression
+        self._cached_system_prompt: Optional[str] = None
+        
+        # Filesystem checkpoint manager (transparent — not a tool)
+        from tools.checkpoint_manager import CheckpointManager
+        self._checkpoint_mgr = CheckpointManager(
+            enabled=checkpoints_enabled,
+            max_snapshots=checkpoint_max_snapshots,
+            max_total_size_mb=checkpoint_max_total_size_mb,
+            max_file_size_mb=checkpoint_max_file_size_mb,
+        )
+        
+        # SQLite session store (optional -- provided by CLI or gateway)
+        self._session_db = session_db
+        self._parent_session_id = parent_session_id
+        self._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
+        self._session_db_created = False  # DB row deferred to run_conversation()
+        self._session_init_model_config = {
+            "max_iterations": self.max_iterations,
+            "reasoning_config": reasoning_config,
+            "max_tokens": max_tokens,
+        }
+        
+        # In-memory todo list for task planning (one per agent/session)
+        from tools.todo_tool import TodoStore
+        self._todo_store = TodoStore()
+        
+        # Load config once for memory, skills, and compression sections
+        try:
+            from hermes_cli.config import load_config as _load_agent_config
+            _agent_cfg = _load_agent_config()
+        except Exception:
+            _agent_cfg = {}
+        try:
+            self._tool_guardrails = ToolCallGuardrailController(
+                ToolCallGuardrailConfig.from_mapping(
+                    _agent_cfg.get("tool_loop_guardrails", {})
+                )
+            )
+        except Exception as _tlg_err:
+            logger.warning("Tool loop guardrail config ignored: %s", _tlg_err)
+        # Cache only the derived auxiliary compression context override that is
+        # needed later by the startup feasibility check.  Avoid exposing a
+        # broad pseudo-public config object on the agent instance.
+        self._aux_compression_context_length_config = None
+
+        # Persistent memory (MEMORY.md + USER.md) -- loaded from disk
+        self._memory_store = None
+        self._memory_enabled = False
+        self._user_profile_enabled = False
+        self._memory_nudge_interval = 10
+        self._turns_since_memory = 0
+        self._iters_since_skill = 0
+        if not skip_memory:
+            try:
+                mem_config = _agent_cfg.get("memory", {})
+                self._memory_enabled = mem_config.get("memory_enabled", False)
+                self._user_profile_enabled = mem_config.get("user_profile_enabled", False)
+                self._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
+                if self._memory_enabled or self._user_profile_enabled:
+                    from tools.memory_tool import MemoryStore
+                    self._memory_store = MemoryStore(
+                        memory_char_limit=mem_config.get("memory_char_limit", 2200),
+                        user_char_limit=mem_config.get("user_char_limit", 1375),
+                    )
+                    self._memory_store.load_from_disk()
+            except Exception:
+                pass  # Memory is optional -- don't break agent init
+        
+
+
+        # Memory provider plugin (external — one at a time, alongside built-in)
+        # Reads memory.provider from config to select which plugin to activate.
+        self._memory_manager = None
+        if not skip_memory:
+            try:
+                _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
+
+                if _mem_provider_name:
+                    from agent.memory_manager import MemoryManager as _MemoryManager
+                    from plugins.memory import load_memory_provider as _load_mem
+                    self._memory_manager = _MemoryManager()
+                    _mp = _load_mem(_mem_provider_name)
+                    if _mp and _mp.is_available():
+                        self._memory_manager.add_provider(_mp)
+                    if self._memory_manager.providers:
+                        _init_kwargs = {
+                            "session_id": self.session_id,
+                            "platform": platform or "cli",
+                            "hermes_home": str(get_hermes_home()),
+                            "agent_context": "primary",
+                        }
+                        # Thread session title for memory provider scoping
+                        # (e.g. honcho uses this to derive chat-scoped session keys)
+                        if self._session_db:
+                            try:
+                                _st = self._session_db.get_session_title(self.session_id)
+                                if _st:
+                                    _init_kwargs["session_title"] = _st
+                            except Exception:
+                                pass
+                        # Thread gateway user identity for per-user memory scoping
+                        if self._user_id:
+                            _init_kwargs["user_id"] = self._user_id
+                        if self._user_name:
+                            _init_kwargs["user_name"] = self._user_name
+                        if self._chat_id:
+                            _init_kwargs["chat_id"] = self._chat_id
+                        if self._chat_name:
+                            _init_kwargs["chat_name"] = self._chat_name
+                        if self._chat_type:
+                            _init_kwargs["chat_type"] = self._chat_type
+                        if self._thread_id:
+                            _init_kwargs["thread_id"] = self._thread_id
+                        # Thread gateway session key for stable per-chat Honcho session isolation
+                        if self._gateway_session_key:
+                            _init_kwargs["gateway_session_key"] = self._gateway_session_key
+                        # Profile identity for per-profile provider scoping
+                        try:
+                            from hermes_cli.profiles import get_active_profile_name
+                            _profile = get_active_profile_name()
+                            _init_kwargs["agent_identity"] = _profile
+                            _init_kwargs["agent_workspace"] = "hermes"
+                        except Exception:
+                            pass
+                        self._memory_manager.initialize_all(**_init_kwargs)
+                        logger.info("Memory provider '%s' activated", _mem_provider_name)
+                    else:
+                        logger.debug("Memory provider '%s' not found or not available", _mem_provider_name)
+                        self._memory_manager = None
+            except Exception as _mpe:
+                logger.warning("Memory provider plugin init failed: %s", _mpe)
+                self._memory_manager = None
+
+        # Inject memory provider tool schemas into the tool surface.
+        # Skip tools whose names already exist (plugins may register the
+        # same tools via ctx.register_tool(), which lands in self.tools
+        # through get_tool_definitions()).  Duplicate function names cause
+        # 400 errors on providers that enforce unique names (e.g. Xiaomi
+        # MiMo via Nous Portal).
+        if self._memory_manager and self.tools is not None:
+            _existing_tool_names = {
+                t.get("function", {}).get("name")
+                for t in self.tools
+                if isinstance(t, dict)
+            }
+            for _schema in self._memory_manager.get_all_tool_schemas():
+                _tname = _schema.get("name", "")
+                if _tname and _tname in _existing_tool_names:
+                    continue  # already registered via plugin path
+                _wrapped = {"type": "function", "function": _schema}
+                self.tools.append(_wrapped)
+                if _tname:
+                    self.valid_tool_names.add(_tname)
+                    _existing_tool_names.add(_tname)
+
+        # Skills config: nudge interval for skill creation reminders
+        self._skill_nudge_interval = 10
+        try:
+            skills_config = _agent_cfg.get("skills", {})
+            self._skill_nudge_interval = int(skills_config.get("creation_nudge_interval", 10))
+        except Exception:
+            pass
+
+        # Tool-use enforcement config: "auto" (default — matches hardcoded
+        # model list), true (always), false (never), or list of substrings.
+        _agent_section = _agent_cfg.get("agent", {})
+        if not isinstance(_agent_section, dict):
+            _agent_section = {}
+        self._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
+
+        # App-level API retry count (wraps each model API call).  Default 3,
+        # overridable via agent.api_max_retries in config.yaml.  See #11616.
+        try:
+            _raw_api_retries = _agent_section.get("api_max_retries", 3)
+            _api_retries = int(_raw_api_retries)
+            _api_retries = max(_api_retries, 1)  # 1 = no retry (single attempt)
+        except (TypeError, ValueError):
+            _api_retries = 3
+        self._api_max_retries = _api_retries
+
+        # Initialize context compressor for automatic context management
+        # Compresses conversation when approaching model's context limit
+        # Configuration via config.yaml (compression section)
+        _compression_cfg = _agent_cfg.get("compression", {})
+        if not isinstance(_compression_cfg, dict):
+            _compression_cfg = {}
+        compression_threshold = float(_compression_cfg.get("threshold", 0.50))
+        try:
+            from agent.auxiliary_client import _compression_threshold_for_model as _cthresh_fn
+            _model_cthresh = _cthresh_fn(self.model)
+            if _model_cthresh is not None:
+                compression_threshold = _model_cthresh
+        except Exception:
+            pass
+        compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in {"true", "1", "yes"}
+        compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
+        compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
+        # protect_first_n is the number of non-system messages to protect at
+        # the head, in addition to the system prompt (which is always
+        # implicitly protected by the compressor).  Floor at 0 — a value of
+        # 0 means "preserve only the system prompt + summary + tail", which
+        # is a legitimate (and common) configuration for long-running
+        # rolling-compaction sessions.
+        compression_protect_first = max(
+            0, int(_compression_cfg.get("protect_first_n", 3))
+        )
+
+        # Read optional explicit context_length override for the auxiliary
+        # compression model. Custom endpoints often cannot report this via
+        # /models, so the startup feasibility check needs the config hint.
+        try:
+            _aux_cfg = cfg_get(_agent_cfg, "auxiliary", "compression", default={})
+        except Exception:
+            _aux_cfg = {}
+        if isinstance(_aux_cfg, dict):
+            _aux_context_config = _aux_cfg.get("context_length")
+        else:
+            _aux_context_config = None
+        if _aux_context_config is not None:
+            try:
+                _aux_context_config = int(_aux_context_config)
+            except (TypeError, ValueError):
+                _aux_context_config = None
+        self._aux_compression_context_length_config = _aux_context_config
+
+        # Read explicit model output-token override from config when the
+        # caller did not pass one directly.
+        _model_cfg = _agent_cfg.get("model", {})
+        if self.max_tokens is None and isinstance(_model_cfg, dict):
+            _config_max_tokens = _model_cfg.get("max_tokens")
+            if _config_max_tokens is not None:
+                try:
+                    if isinstance(_config_max_tokens, bool):
+                        raise ValueError
+                    _parsed_max_tokens = int(_config_max_tokens)
+                    if _parsed_max_tokens <= 0:
+                        raise ValueError
+                    self.max_tokens = _parsed_max_tokens
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Invalid model.max_tokens in config.yaml: %r — "
+                        "must be a positive integer (e.g. 4096). "
+                        "Falling back to provider default.",
+                        _config_max_tokens,
+                    )
+                    print(
+                        f"\n⚠ Invalid model.max_tokens in config.yaml: {_config_max_tokens!r}\n"
+                        f"  Must be a positive integer (e.g. 4096).\n"
+                        f"  Falling back to provider default.\n",
+                        file=sys.stderr,
+                    )
+        self._session_init_model_config["max_tokens"] = self.max_tokens
+
+        # Read explicit context_length override from model config
+        if isinstance(_model_cfg, dict):
+            _config_context_length = _model_cfg.get("context_length")
+        else:
+            _config_context_length = None
+        if _config_context_length is not None:
+            try:
+                _config_context_length = int(_config_context_length)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid model.context_length in config.yaml: %r — "
+                    "must be a plain integer (e.g. 256000, not '256K'). "
+                    "Falling back to auto-detection.",
+                    _config_context_length,
+                )
+                print(
+                    f"\n⚠ Invalid model.context_length in config.yaml: {_config_context_length!r}\n"
+                    f"  Must be a plain integer (e.g. 256000, not '256K').\n"
+                    f"  Falling back to auto-detected context window.\n",
+                    file=sys.stderr,
+                )
+                _config_context_length = None
+
+        # Resolve custom_providers list once for reuse below (startup
+        # context-length override and plugin context-engine init).
+        try:
+            from hermes_cli.config import get_compatible_custom_providers
+            _custom_providers = get_compatible_custom_providers(_agent_cfg)
+        except Exception:
+            _custom_providers = _agent_cfg.get("custom_providers")
+            if not isinstance(_custom_providers, list):
+                _custom_providers = []
+
+        # Store for reuse by _check_compression_model_feasibility (auxiliary
+        # compression model context-length detection needs the same list).
+        self._custom_providers = _custom_providers
+
+        # Check custom_providers per-model context_length
+        if _config_context_length is None and _custom_providers:
+            try:
+                from hermes_cli.config import get_custom_provider_context_length
+                _cp_ctx_resolved = get_custom_provider_context_length(
+                    model=self.model,
+                    base_url=self.base_url,
+                    custom_providers=_custom_providers,
+                )
+                if _cp_ctx_resolved:
+                    _config_context_length = int(_cp_ctx_resolved)
+            except Exception:
+                _cp_ctx_resolved = None
+
+            # Surface a clear warning if the user set a context_length but it
+            # wasn't a valid positive int — the helper silently skips those.
+            if _config_context_length is None:
+                _target = self.base_url.rstrip("/") if self.base_url else ""
+                for _cp_entry in _custom_providers:
+                    if not isinstance(_cp_entry, dict):
+                        continue
+                    _cp_url = (_cp_entry.get("base_url") or "").rstrip("/")
+                    if _target and _cp_url == _target:
+                        _cp_models = _cp_entry.get("models", {})
+                        if isinstance(_cp_models, dict):
+                            _cp_model_cfg = _cp_models.get(self.model, {})
+                            if isinstance(_cp_model_cfg, dict):
+                                _cp_ctx = _cp_model_cfg.get("context_length")
+                                if _cp_ctx is not None:
+                                    try:
+                                        _parsed = int(_cp_ctx)
+                                        if _parsed <= 0:
+                                            raise ValueError
+                                    except (TypeError, ValueError):
+                                        logger.warning(
+                                            "Invalid context_length for model %r in "
+                                            "custom_providers: %r — must be a positive "
+                                            "integer (e.g. 256000, not '256K'). "
+                                            "Falling back to auto-detection.",
+                                            self.model, _cp_ctx,
+                                        )
+                                        print(
+                                            f"\n⚠ Invalid context_length for model {self.model!r} in custom_providers: {_cp_ctx!r}\n"
+                                            f"  Must be a positive integer (e.g. 256000, not '256K').\n"
+                                            f"  Falling back to auto-detected context window.\n",
+                                            file=sys.stderr,
+                                        )
+                        break
+
+        # Persist for reuse on switch_model / fallback activation. Must come
+        # AFTER the custom_providers branch so per-model overrides aren't lost.
+        self._config_context_length = _config_context_length
+
+        self._ensure_lmstudio_runtime_loaded(_config_context_length)
+
+
+
+        # Select context engine: config-driven (like memory providers).
+        # 1. Check config.yaml context.engine setting
+        # 2. Check plugins/context_engine/<name>/ directory (repo-shipped)
+        # 3. Check general plugin system (user-installed plugins)
+        # 4. Fall back to built-in ContextCompressor
+        _selected_engine = None
+        _engine_name = "compressor"  # default
+        try:
+            _ctx_cfg = _agent_cfg.get("context", {}) if isinstance(_agent_cfg, dict) else {}
+            _engine_name = _ctx_cfg.get("engine", "compressor") or "compressor"
+        except Exception:
+            pass
+
+        if _engine_name != "compressor":
+            # Try loading from plugins/context_engine/<name>/
+            try:
+                from plugins.context_engine import load_context_engine
+                _selected_engine = load_context_engine(_engine_name)
+            except Exception as _ce_load_err:
+                logger.debug("Context engine load from plugins/context_engine/: %s", _ce_load_err)
+
+            # Try general plugin system as fallback
+            if _selected_engine is None:
+                try:
+                    from hermes_cli.plugins import get_plugin_context_engine
+                    _candidate = get_plugin_context_engine()
+                    if _candidate and _candidate.name == _engine_name:
+                        _selected_engine = _candidate
+                except Exception:
+                    pass
+
+            if _selected_engine is None:
+                logger.warning(
+                    "Context engine '%s' not found — falling back to built-in compressor",
+                    _engine_name,
+                )
+        # else: config says "compressor" — use built-in, don't auto-activate plugins
+
+        if _selected_engine is not None:
+            self.context_compressor = _selected_engine
+            # Resolve context_length for plugin engines — mirrors switch_model() path
+            from agent.model_metadata import get_model_context_length
+            _plugin_ctx_len = get_model_context_length(
+                self.model,
+                base_url=self.base_url,
+                api_key=getattr(self, "api_key", ""),
+                config_context_length=_config_context_length,
+                provider=self.provider,
+                custom_providers=_custom_providers,
+            )
+            self.context_compressor.update_model(
+                model=self.model,
+                context_length=_plugin_ctx_len,
+                base_url=self.base_url,
+                api_key=getattr(self, "api_key", ""),
+                provider=self.provider,
+            )
+            if not self.quiet_mode:
+                logger.info("Using context engine: %s", _selected_engine.name)
+        else:
+            self.context_compressor = ContextCompressor(
+                model=self.model,
+                threshold_percent=compression_threshold,
+                protect_first_n=compression_protect_first,
+                protect_last_n=compression_protect_last,
+                summary_target_ratio=compression_target_ratio,
+                summary_model_override=None,
+                quiet_mode=self.quiet_mode,
+                base_url=self.base_url,
+                api_key=getattr(self, "api_key", ""),
+                config_context_length=_config_context_length,
+                provider=self.provider,
+                api_mode=self.api_mode,
+            )
+        self.compression_enabled = compression_enabled
+
+        # Reject models whose context window is below the minimum required
+        # for reliable tool-calling workflows (64K tokens).
+        from agent.model_metadata import MINIMUM_CONTEXT_LENGTH
+        _ctx = getattr(self.context_compressor, "context_length", 0)
+        if _ctx and _ctx < MINIMUM_CONTEXT_LENGTH:
+            raise ValueError(
+                f"Model {self.model} has a context window of {_ctx:,} tokens, "
+                f"which is below the minimum {MINIMUM_CONTEXT_LENGTH:,} required "
+                f"by Hermes Agent.  Choose a model with at least "
+                f"{MINIMUM_CONTEXT_LENGTH // 1000}K context, or set "
+                f"model.context_length in config.yaml to override."
+            )
+
+        # Inject context engine tool schemas (e.g. lcm_grep, lcm_describe, lcm_expand).
+        # Skip names that are already present — the get_tool_definitions()
+        # quiet_mode cache returned a shared list pre-#17335, so a stray
+        # mutation here would poison subsequent agent inits in the same
+        # Gateway process and trip provider-side 'duplicate tool name'
+        # errors. Even with the cache fix, dedup is the right defense
+        # against plugin paths that may register the same schemas via
+        # ctx.register_tool(). Mirrors the memory tools dedup above.
+        self._context_engine_tool_names: set = set()
+        if hasattr(self, "context_compressor") and self.context_compressor and self.tools is not None:
+            _existing_tool_names = {
+                t.get("function", {}).get("name")
+                for t in self.tools
+                if isinstance(t, dict)
+            }
+            for _schema in self.context_compressor.get_tool_schemas():
+                _tname = _schema.get("name", "")
+                if _tname and _tname in _existing_tool_names:
+                    continue  # already registered via plugin/cache path
+                _wrapped = {"type": "function", "function": _schema}
+                self.tools.append(_wrapped)
+                if _tname:
+                    self.valid_tool_names.add(_tname)
+                    self._context_engine_tool_names.add(_tname)
+                    _existing_tool_names.add(_tname)
+
+        # Preserve the complete post-init tool surface so the full configured
+        # tools remain available for the whole session. Keep a snapshot in case
+        # any legacy path narrows ``self.tools`` and needs restoration.
+        self._full_tools = list(self.tools or [])
+        self._full_valid_tool_names = set(self.valid_tool_names)
+        self._initial_tool_gating_applied = False
+        self._tool_gating_summary = None
+
+        # Notify context engine of session start
+        if hasattr(self, "context_compressor") and self.context_compressor:
+            try:
+                self.context_compressor.on_session_start(
+                    self.session_id,
+                    hermes_home=str(get_hermes_home()),
+                    platform=self.platform or "cli",
+                    model=self.model,
+                    context_length=getattr(self.context_compressor, "context_length", 0),
+                )
+            except Exception as _ce_err:
+                logger.debug("Context engine on_session_start: %s", _ce_err)
+
+        self._subdirectory_hints = SubdirectoryHintTracker(
+            working_dir=os.getenv("TERMINAL_CWD") or None,
+        )
+        self._user_turn_count = 0
+
+        # Cumulative token usage for the session
+        self.session_prompt_tokens = 0
+        self.session_completion_tokens = 0
+        self.session_total_tokens = 0
+        self.session_api_calls = 0
+        self.session_input_tokens = 0
+        self.session_output_tokens = 0
+        self.session_cache_read_tokens = 0
+        self.session_cache_write_tokens = 0
+        self.session_reasoning_tokens = 0
+        self.session_estimated_cost_usd = 0.0
+        self.session_cost_status = "unknown"
+        self.session_cost_source = "none"
+        
+        # ── Ollama num_ctx injection ──
+        # Ollama defaults to 2048 context regardless of the model's capabilities.
+        # When running against an Ollama server, detect the model's max context
+        # and pass num_ctx on every chat request so the full window is used.
+        # User override: set model.ollama_num_ctx in config.yaml to cap VRAM use.
+        # If model.context_length is set, it caps num_ctx so the user's VRAM
+        # budget is respected even when GGUF metadata advertises a larger window.
+        self._ollama_num_ctx: int | None = None
+        _ollama_num_ctx_override = None
+        if isinstance(_model_cfg, dict):
+            _ollama_num_ctx_override = _model_cfg.get("ollama_num_ctx")
+        if _ollama_num_ctx_override is not None:
+            try:
+                self._ollama_num_ctx = int(_ollama_num_ctx_override)
+            except (TypeError, ValueError):
+                logger.debug("Invalid ollama_num_ctx config value: %r", _ollama_num_ctx_override)
+        if self._ollama_num_ctx is None and self.base_url and is_local_endpoint(self.base_url):
+            try:
+                _detected = query_ollama_num_ctx(self.model, self.base_url, api_key=self.api_key or "")
+                if _detected and _detected > 0:
+                    self._ollama_num_ctx = _detected
+            except Exception as exc:
+                logger.debug("Ollama num_ctx detection failed: %s", exc)
+        # Cap auto-detected ollama_num_ctx to the user's explicit context_length.
+        # Without this, GGUF metadata can advertise 256K+ which Ollama honours
+        # by allocating that much VRAM — blowing up small GPUs even though the
+        # user explicitly set a smaller context_length in config.yaml.
+        if (
+            self._ollama_num_ctx
+            and _config_context_length
+            and _ollama_num_ctx_override is None  # don't override explicit ollama_num_ctx
+            and self._ollama_num_ctx > _config_context_length
+        ):
+            logger.info(
+                "Ollama num_ctx capped: %d -> %d (model.context_length override)",
+                self._ollama_num_ctx, _config_context_length,
+            )
+            self._ollama_num_ctx = _config_context_length
+        if self._ollama_num_ctx and not self.quiet_mode:
+            logger.info(
+                "Ollama num_ctx: will request %d tokens (model max from /api/show)",
+                self._ollama_num_ctx,
+            )
+
+        if not self.quiet_mode:
+            if compression_enabled:
+                print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (compress at {int(compression_threshold*100)}% = {self.context_compressor.threshold_tokens:,})")
+            else:
+                print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (auto-compression disabled)")
+
+        # Check immediately so CLI users see the warning at startup.
+        # Gateway status_callback is not yet wired, so any warning is stored
+        # in _compression_warning and replayed in the first run_conversation().
+        self._compression_warning = None
+        self._check_compression_model_feasibility()
+
+        # Snapshot primary runtime for per-turn restoration.  When fallback
+        # activates during a turn, the next turn restores these values so the
+        # preferred model gets a fresh attempt each time.  Uses a single dict
+        # so new state fields are easy to add without N individual attributes.
+        _cc = self.context_compressor
+        self._primary_runtime = {
+            "model": self.model,
+            "provider": self.provider,
+            "base_url": self.base_url,
+            "api_mode": self.api_mode,
+            "api_key": getattr(self, "api_key", ""),
+            "client_kwargs": dict(self._client_kwargs),
+            "use_prompt_caching": self._use_prompt_caching,
+            "use_native_cache_layout": self._use_native_cache_layout,
+            # Context engine state that _try_activate_fallback() overwrites.
+            # Use getattr for model/base_url/api_key/provider since plugin
+            # engines may not have these (they're ContextCompressor-specific).
+            "compressor_model": getattr(_cc, "model", self.model),
+            "compressor_base_url": getattr(_cc, "base_url", self.base_url),
+            "compressor_api_key": getattr(_cc, "api_key", ""),
+            "compressor_provider": getattr(_cc, "provider", self.provider),
+            "compressor_context_length": _cc.context_length,
+            "compressor_threshold_tokens": _cc.threshold_tokens,
+        }
+        if self.api_mode == "anthropic_messages":
+            self._primary_runtime.update({
+                "anthropic_api_key": self._anthropic_api_key,
+                "anthropic_base_url": self._anthropic_base_url,
+                "is_anthropic_oauth": self._is_anthropic_oauth,
+            })
 
     def _get_session_db_for_recall(self):
         """Return a SessionDB for recall, lazily creating it if an entrypoint forgot.
@@ -1327,15 +2095,7 @@ class AIAgent:
             return False
         if stripped.endswith("```"):
             return True
-        if stripped.endswith('^'):
-            return True
-        last = stripped[-1]
-        if last in '.!?:)"\']}。！？：）】」』》^':
-            return True
-        # Emoji ranges (Misc Symbols, Dingbats, Emoticons, Supplemental, etc.)
-        if ord(last) >= 0x1F300:
-            return True
-        return False
+        return stripped[-1] in '.!?:)"\']}。！？：）】」』》'
 
     def _is_ollama_glm_backend(self) -> bool:
         """Detect the narrow backend family affected by Ollama/GLM stop misreports."""
@@ -3223,6 +3983,86 @@ class AIAgent:
         """Check if an interrupt has been requested."""
         return self._interrupt_requested
 
+    def _normalize_tool_query_terms(self, text: str) -> list[str]:
+        normalized = re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+        return [
+            term for term in normalized.split()
+            if len(term) >= 2 and term not in _TOOL_QUERY_STOPWORDS
+        ]
+
+    def _score_initial_tool_schema(
+        self,
+        tool_def: Dict[str, Any],
+        query_terms: list[str],
+        normalized_query: str,
+    ) -> int:
+        fn = tool_def.get("function", {}) if isinstance(tool_def, dict) else {}
+        name = str(fn.get("name") or "")
+        description = str(fn.get("description") or "")
+        toolset = get_toolset_for_tool(name) or ""
+
+        norm_name = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+        norm_desc = re.sub(r"[^a-z0-9]+", " ", description.lower()).strip()
+        norm_toolset = re.sub(r"[^a-z0-9]+", " ", toolset.lower()).strip()
+        compact_query = normalized_query.replace(" ", "")
+        compact_name = norm_name.replace(" ", "")
+        combined = " ".join(part for part in (norm_name, norm_desc, norm_toolset) if part)
+
+        score = 0
+        if norm_name and norm_name in normalized_query:
+            score += 18
+        if compact_name and compact_name in compact_query:
+            score += 14
+
+        for term in query_terms:
+            if term in norm_name:
+                score += 7
+            if term in norm_desc:
+                score += 3
+            if term in norm_toolset:
+                score += 5
+
+        matched_terms = sum(1 for term in query_terms if term in combined)
+        if matched_terms:
+            score += matched_terms * 2
+
+        keyword_buckets = []
+        if toolset:
+            keyword_buckets.append(toolset)
+        keyword_buckets.append(name)
+        for bucket in keyword_buckets:
+            for keyword in _TOOL_QUERY_KEYWORDS.get(bucket, ()):
+                if keyword in normalized_query:
+                    score += 12 if bucket == toolset else 8
+
+        return score
+
+    def _maybe_specialize_tool_surface_for_query(self, query: str) -> None:
+        """Preserve the full configured tool surface for the whole session.
+
+        This method remains as a compatibility shim for older call sites/tests
+        that may still invoke it. If a legacy path narrowed ``self.tools``,
+        restore the complete post-init surface captured during agent init.
+        """
+        self._initial_tool_gating_applied = True
+
+        full_tools = list(getattr(self, "_full_tools", None) or [])
+        if not full_tools:
+            return
+
+        self.tools = full_tools
+        full_valid_tool_names = set(getattr(self, "_full_valid_tool_names", set()) or set())
+        if full_valid_tool_names:
+            self.valid_tool_names = full_valid_tool_names
+        else:
+            self.valid_tool_names = {
+                tool.get("function", {}).get("name")
+                for tool in full_tools
+                if isinstance(tool, dict)
+            }
+            self.valid_tool_names.discard(None)
+
+        self._tool_gating_summary = None
 
 
 
@@ -3241,10 +4081,6 @@ class AIAgent:
         """Forwarder — see ``agent.system_prompt.build_system_prompt``."""
         from agent.system_prompt import build_system_prompt
         return build_system_prompt(self, system_message=system_message, skill_query=skill_query)
-
-    # =========================================================================
-    # Pre/post-call guardrails (inspired by PR #1321 — @alireza78a)
-    # =========================================================================
 
     @staticmethod
     def _get_tool_call_id_static(tc) -> str:
@@ -4909,26 +5745,12 @@ class AIAgent:
         DeepSeek v4 thinking and Kimi / Moonshot thinking both reject replays
         of assistant tool-call messages that omit ``reasoning_content`` (refs
         #15250, #17400). Xiaomi MiMo thinking mode has the same requirement.
-
-        Result cached on the AIAgent instance keyed by (provider, model,
-        base_url); invalidated whenever ``switch_model()`` /
-        ``_try_activate_fallback()`` mutate any of those. This is hot — the
-        agent loop hits ~16 invocations per turn, each of which would
-        otherwise re-run ~5 ``base_url_host_matches`` (and therefore
-        ``urlparse``) calls under it. Caching drops the per-turn cost from
-        ~5us × 16 = ~80us to <1us.
         """
-        key = (self.provider, self.model, getattr(self, "_base_url_lower", self.base_url))
-        cached = getattr(self, "_thinking_pad_cache", None)
-        if cached is not None and cached[0] == key:
-            return cached[1]
-        result = (
+        return (
             self._needs_deepseek_tool_reasoning()
             or self._needs_kimi_tool_reasoning()
             or self._needs_mimo_tool_reasoning()
         )
-        self._thinking_pad_cache = (key, result)
-        return result
 
     def _needs_kimi_tool_reasoning(self) -> bool:
         """Return True when the current provider is Kimi / Moonshot thinking mode.
@@ -5217,8 +6039,16 @@ class AIAgent:
         persist_user_message: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
-        from agent.conversation_loop import run_conversation
-        return run_conversation(self, user_message, system_message, conversation_history, task_id, stream_callback, persist_user_message)
+        from agent.conversation_loop import run_conversation as _run_conversation
+        return _run_conversation(
+            self,
+            user_message,
+            system_message=system_message,
+            conversation_history=conversation_history,
+            task_id=task_id,
+            stream_callback=stream_callback,
+            persist_user_message=persist_user_message,
+        )
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """
