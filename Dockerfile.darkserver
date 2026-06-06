@@ -1,0 +1,68 @@
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y \
+    curl git bash ca-certificates gnupg ripgrep ffmpeg tini rclone \
+    libvulkan-dev glslang-tools \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv installs Python 3.11 itself — no apt python needed
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+ENV PATH="/root/.cargo/bin:/root/.local/bin:$PATH"
+ENV QMD_DATA_DIR="/root/.hermes/qmd"
+
+WORKDIR /app
+COPY . /app
+
+RUN npm install -g @tobilu/qmd \
+    && node - <<'EOF'
+const fs = require('fs');
+const path = require('path');
+const cp = require('child_process');
+const root = cp.execSync('npm root -g', { encoding: 'utf8' }).trim();
+const f = path.join(root, '@tobilu/qmd', 'dist', 'llm.js');
+if (!fs.existsSync(f)) {
+  console.error(`QMD patch failed: ${f} not found`);
+  process.exit(1);
+}
+const src = fs.readFileSync(f, 'utf8');
+const target = /const loadLlama = async \(gpu\) => await getLlama\(\{\n\s*build: "autoAttempt",\n\s*logLevel: LlamaLogLevel\.error,\n\s*gpu,\n\s*\}\);/;
+let patched = src;
+if (target.test(src)) {
+  patched = src.replace(
+    target,
+    `const loadLlama = async (gpu) => await getLlama({\n                build: "never",\n                logLevel: LlamaLogLevel.error,\n                gpu: false,\n            });`
+  );
+}
+if (patched === src && !src.includes('build: "never"')) {
+  console.error('QMD patch failed: expected getLlama stanza not found');
+  process.exit(1);
+}
+fs.writeFileSync(f, patched);
+console.log(`QMD llm.js patched for CPU prebuilt mode at ${f}.`);
+EOF
+
+RUN uv venv venv --python 3.11 \
+    && export VIRTUAL_ENV=/app/venv \
+    && uv pip install -e ".[all]" \
+    && uv pip install google-api-python-client google-auth-oauthlib google-auth-httplib2 garminconnect \
+    && if [ -f "./tinker-atropos/pyproject.toml" ]; then uv pip install -e "./tinker-atropos"; fi
+
+RUN mkdir -p /root/.local/bin \
+    && ln -sf /app/venv/bin/hermes /root/.local/bin/hermes \
+    && install -m 0755 /app/scripts/darkserver-start.sh /root/.local/bin/darkserver-start.sh \
+    && if [ -f /app/scripts/obsidian-sync.sh ]; then install -m 0755 /app/scripts/obsidian-sync.sh /root/.local/bin/obsidian-sync.sh; fi
+
+RUN mkdir -p /root/.hermes/{cron,sessions,logs,memories,skills,pairing,hooks,image_cache,audio_cache,whatsapp/session,qmd} \
+    && cp /app/cli-config.yaml.example /root/.hermes/config.yaml
+
+VOLUME ["/root/.hermes"]
+EXPOSE 6666
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["darkserver-start.sh"]
