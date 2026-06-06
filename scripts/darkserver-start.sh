@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VAULT="${VAULT:-/root/.hermes/obsidian-vault}"
+VAULT="${VAULT:-/root/obsidian-vault}"
 QMD_COLLECTION_NAME="${QMD_COLLECTION_NAME:-obsidian}"
 QMD_LOG_DIR="${QMD_LOG_DIR:-/root/.hermes/logs}"
 QMD_LOG_FILE="${QMD_LOG_FILE:-$QMD_LOG_DIR/qmd-embed.log}"
