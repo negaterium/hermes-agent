@@ -1016,9 +1016,23 @@ class TestToolUseEnforcementConfig:
 
 
 
+    def test_auto_injects_execution_guidance_for_grok(self):
+        """Grok also gets OPENAI_MODEL_EXECUTION_GUIDANCE (verification,
+        mandatory_tool_use, act_dont_ask). Same failure modes as GPT in
+        practice — claims completion without tool calls, suggests workarounds
+        instead of using existing tools.
+        """
+        from agent.prompt_builder import build_openai_model_execution_guidance
+        agent = self._make_agent(model="x-ai/grok-4.3", tool_use_enforcement="auto")
+        prompt = agent._build_system_prompt()
+        assert build_openai_model_execution_guidance(agent.valid_tool_names) in prompt
 
-
-
+    def test_auto_injects_execution_guidance_for_xai_oauth_model(self):
+        """xai-oauth bare model names (no slash) also match the grok pattern."""
+        from agent.prompt_builder import build_openai_model_execution_guidance
+        agent = self._make_agent(model="grok-4.3", tool_use_enforcement="auto")
+        prompt = agent._build_system_prompt()
+        assert build_openai_model_execution_guidance(agent.valid_tool_names) in prompt
 
 
 
@@ -4242,17 +4256,11 @@ class TestRetryExhaustion:
             usage=None,
         )
         agent.client.chat.completions.create.return_value = bad_resp
-        # The conversation loop was extracted out of run_agent.py and pulls
-        # in time/jittered_backoff at module level — patch BOTH so the
-        # retry waits don't burn 18+ seconds of real wall-clock time here.
-        from agent import conversation_loop as _conv_loop
         with (
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
             patch("run_agent.time", self._make_fast_time_mock()),
-            patch.object(_conv_loop, "time", self._make_fast_time_mock()),
-            patch.object(_conv_loop, "jittered_backoff", lambda *a, **k: 0.0),
         ):
             result = agent.run_conversation("hello")
         assert result.get("completed") is False, (
@@ -4347,6 +4355,22 @@ class TestRetryExhaustion:
         # Crucial regression guard: a deterministic refusal is NOT retried —
         # exactly one API call, no empty-response retry loop.
         assert agent.client.chat.completions.create.call_count == 1
+
+    def test_api_error_returns_gracefully_after_retries(self, agent):
+        """Exhausted retries on API errors must return error result, not crash."""
+        self._setup_agent(agent)
+        agent.client.chat.completions.create.side_effect = RuntimeError("rate limited")
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch("run_agent.time", self._make_fast_time_mock()),
+        ):
+            result = agent.run_conversation("hello")
+        assert result.get("completed") is False
+        assert result.get("failed") is True
+        assert "error" in result
+        assert "rate limited" in result["error"]
 
 
     def test_build_api_kwargs_error_no_unbound_local(self, agent):
