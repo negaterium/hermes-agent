@@ -118,7 +118,7 @@ Scoped to the Feishu document-comment handler. Drives comment read/write operati
 
 ## `kanban` toolset
 
-Registered when the agent is either (a) spawned by the kanban dispatcher (`HERMES_KANBAN_TASK` env set) or (b) running in a profile that explicitly enables the `kanban` toolset. Task-scoped workers use lifecycle tools for their assigned task; orchestrator profiles additionally get board-routing tools like `kanban_list` and `kanban_unblock`. See [Kanban Multi-Agent](/user-guide/features/kanban) for the full workflow.
+Registered when the agent is either (a) spawned by the kanban dispatcher (`HERMES_KANBAN_TASK` env set) or (b) running in a profile that explicitly enables the `kanban` toolset. Task-scoped workers use lifecycle tools for their assigned task; orchestrator profiles additionally get board-routing tools like `kanban_list` and `kanban_unblock`, plus worker actions for structured handoffs, blocking, heartbeat updates, and thread comments. See [Kanban Multi-Agent](/user-guide/features/kanban) for the full workflow.
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
@@ -148,11 +148,32 @@ Tools for driving desktop [Projects](../user-guide/cli.md) — named, multi-fold
 |------|-------------|----------------------|
 | `memory` | Save important information to persistent memory that survives across sessions. Your memory appears in your system prompt at session start -- it's how you remember things about the user and your environment between conversations. WHEN TO SA… | — |
 
+## `messaging` toolset
+
+| Tool | Description | Requires environment |
+|------|-------------|----------------------|
+| `send_message` | Send a message to a connected messaging platform, or list available targets. IMPORTANT: When the user asks to send to a specific channel or person (not just a bare platform name), call send_message(action='list') FIRST to see available tar… | — |
+
+## `moa` toolset
+
+| Tool | Description | Requires environment |
+|------|-------------|----------------------|
+| `mixture_of_agents` | Route a hard problem through multiple frontier LLMs collaboratively. Makes 5 API calls (4 reference models + 1 aggregator) with maximum reasoning effort — use sparingly for genuinely difficult problems. Best for: complex math, advanced alg… | OPENROUTER_API_KEY |
+
+## `knowledge` toolset
+
+| Tool | Description | Requires environment |
+|------|-------------|----------------------|
+| `knowledge_search` | Search your local knowledge base and notes. Use this for Obsidian vault notes, research docs, and other indexed local knowledge sources. This searches local knowledge only — it does not search the web. | — |
+| `knowledge_read` | Read a specific local knowledge-base document by qmd ref/path. | — |
+
 ## `session_search` toolset
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
 | `session_search` | Search past sessions stored in the local session DB, or scroll inside one. FTS5-backed retrieval; returns actual messages from the DB (no LLM calls). Three shapes: discovery (pass `query`), scroll (pass `session_id` + `around_message_id`), browse (no args). | — |
+| `session_list` | List recent past sessions with titles, previews, and timestamps. Use this when the user asks what you worked on recently or you want to browse recall candidates before reading one. | — |
+| `session_read` | Read a past session transcript excerpt by session_id. Use after session_list or session_search when you need the raw conversation details instead of a summary. | — |
 
 ## `skills` toolset
 
@@ -180,7 +201,7 @@ Tools for driving desktop [Projects](../user-guide/cli.md) — named, multi-fold
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
-| `vision_analyze` | Analyze images using AI vision. On vision-capable main models, returns the raw image pixels as a multimodal tool result so the model sees them natively on its next turn. On text-only main models, falls back to an auxiliary vision model that describes the image and returns the description as text. Tool signature is identical either way. | — |
+| `vision_analyze` | Analyze images using AI vision. Provides a comprehensive description and answers a specific question about the image content. | — |
 
 ## `video` toolset
 
