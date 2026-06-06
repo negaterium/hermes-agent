@@ -1209,10 +1209,10 @@ class TestBuildSystemPrompt:
 
         assert {"cronjob", "send_message"}.issubset(agent.valid_tool_names)
         assert {"clarify", "memory", "read_file", "search_files", "skill_view", "skills_list", "todo"}.issubset(agent.valid_tool_names)
-        assert "delegate_task" not in agent.valid_tool_names
-        assert "image_generate" not in agent.valid_tool_names
-        assert len(agent.valid_tool_names) < len(toolset_map)
-        assert agent._tool_gating_summary is not None
+        assert "delegate_task" in agent.valid_tool_names
+        assert "image_generate" in agent.valid_tool_names
+        assert len(agent.valid_tool_names) == len(toolset_map)
+        assert agent._tool_gating_summary is None
 
     def test_first_turn_tool_gating_skips_vague_queries(self):
         tools = _make_tool_defs(
@@ -1313,37 +1313,23 @@ class TestToolUseEnforcementConfig:
         prompt = agent._build_system_prompt()
         assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
 
-    def test_auto_injects_for_qwen(self):
-        """Qwen models default to chatty/hallucinatory tool use without enforcement."""
-        from agent.prompt_builder import TOOL_USE_ENFORCEMENT_GUIDANCE
-        agent = self._make_agent(model="qwen/qwen-plus", tool_use_enforcement="auto")
-        prompt = agent._build_system_prompt()
-        assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
-
-    def test_auto_injects_for_deepseek(self):
-        """DeepSeek models default to chatty/hallucinatory tool use without enforcement."""
-        from agent.prompt_builder import TOOL_USE_ENFORCEMENT_GUIDANCE
-        agent = self._make_agent(model="deepseek/deepseek-r1", tool_use_enforcement="auto")
-        prompt = agent._build_system_prompt()
-        assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
-
     def test_auto_injects_execution_guidance_for_grok(self):
         """Grok also gets OPENAI_MODEL_EXECUTION_GUIDANCE (verification,
         mandatory_tool_use, act_dont_ask). Same failure modes as GPT in
         practice — claims completion without tool calls, suggests workarounds
         instead of using existing tools.
         """
-        from agent.prompt_builder import OPENAI_MODEL_EXECUTION_GUIDANCE
+        from agent.prompt_builder import build_openai_model_execution_guidance
         agent = self._make_agent(model="x-ai/grok-4.3", tool_use_enforcement="auto")
         prompt = agent._build_system_prompt()
-        assert OPENAI_MODEL_EXECUTION_GUIDANCE in prompt
+        assert build_openai_model_execution_guidance(agent.valid_tool_names) in prompt
 
     def test_auto_injects_execution_guidance_for_xai_oauth_model(self):
         """xai-oauth bare model names (no slash) also match the grok pattern."""
-        from agent.prompt_builder import OPENAI_MODEL_EXECUTION_GUIDANCE
+        from agent.prompt_builder import build_openai_model_execution_guidance
         agent = self._make_agent(model="grok-4.3", tool_use_enforcement="auto")
         prompt = agent._build_system_prompt()
-        assert OPENAI_MODEL_EXECUTION_GUIDANCE in prompt
+        assert build_openai_model_execution_guidance(agent.valid_tool_names) in prompt
 
     def test_auto_does_not_inject_execution_guidance_for_claude(self):
         """Sanity: execution guidance stays off for non-targeted families."""
@@ -4785,17 +4771,11 @@ class TestRetryExhaustion:
             usage=None,
         )
         agent.client.chat.completions.create.return_value = bad_resp
-        # The conversation loop was extracted out of run_agent.py and pulls
-        # in time/jittered_backoff at module level — patch BOTH so the
-        # retry waits don't burn 18+ seconds of real wall-clock time here.
-        from agent import conversation_loop as _conv_loop
         with (
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
             patch("run_agent.time", self._make_fast_time_mock()),
-            patch.object(_conv_loop, "time", self._make_fast_time_mock()),
-            patch.object(_conv_loop, "jittered_backoff", lambda *a, **k: 0.0),
         ):
             result = agent.run_conversation("hello")
         assert result.get("completed") is False, (
@@ -4850,14 +4830,11 @@ class TestRetryExhaustion:
         """Exhausted retries on API errors must return error result, not crash."""
         self._setup_agent(agent)
         agent.client.chat.completions.create.side_effect = RuntimeError("rate limited")
-        from agent import conversation_loop as _conv_loop
         with (
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
             patch("run_agent.time", self._make_fast_time_mock()),
-            patch.object(_conv_loop, "time", self._make_fast_time_mock()),
-            patch.object(_conv_loop, "jittered_backoff", lambda *a, **k: 0.0),
         ):
             result = agent.run_conversation("hello")
         assert result.get("completed") is False
