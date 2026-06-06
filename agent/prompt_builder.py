@@ -7,6 +7,7 @@ assemble pieces, then combines them with memory and ephemeral prompts.
 import json
 import logging
 import os
+import re
 import threading
 import contextvars
 from collections import OrderedDict
