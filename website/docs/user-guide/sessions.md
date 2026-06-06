@@ -61,9 +61,6 @@ into chat.
 Use `/compress` when a session gets long, `/new` for a fresh thread, and
 `hermes sessions prune` only when you want to delete old ended sessions from
 storage. Compression reduces the active context; it is not a privacy delete.
-Pass a name to `/new` (e.g. `/new payments-refactor`) to set the new session's
-initial title up front — useful for finding it later with `/resume <name>` or
-in the `/sessions` picker.
 :::
 
 ### Session Sources
@@ -372,6 +369,11 @@ For deeper analytics — token usage, cost estimates, tool breakdown, and activi
 
 The agent has a built-in `session_search` tool that performs full-text search across all past conversations using SQLite's FTS5 engine — and lets the agent scroll through any session it finds. No LLM calls, no summarization, no truncation. Every shape returns actual messages from the DB.
 
+Companion tools still exist for targeted browsing and transcript reads:
+
+- `session_list` — browse recent sessions by title/preview/timestamp
+- `session_read` — read a raw transcript excerpt for a specific session
+
 ### Three calling shapes
 
 The tool infers what you want from which arguments you set. There's no `mode` parameter.
@@ -416,9 +418,9 @@ session_search()
 
 Returns recent sessions chronologically (titles, previews, timestamps). Useful when the user asks "what was I working on" without naming a topic.
 
-### FTS5 query syntax
+### FTS5 Query Syntax
 
-The keyword mode supports standard FTS5 query syntax:
+The search supports standard FTS5 query syntax:
 
 - Simple keywords: `docker deployment` (FTS5 defaults to AND)
 - Phrases: `"exact phrase"`
@@ -432,11 +434,9 @@ The keyword mode supports standard FTS5 query syntax:
 
 ### When It's Used
 
-The agent is prompted to use session search automatically:
+The agent is prompted to use session recall automatically:
 
-> *"When the user references something from a past conversation or you suspect relevant prior context exists, use session_search to recall it before asking them to repeat themselves."*
-
-Typical triggers: "we did this before", "remember when", "last time", "as I mentioned", or any reference to a project/person/concept that isn't in the current window.
+> *"When the user references something from a past conversation or you suspect relevant prior context exists, use session_search to recall it before asking them to repeat themselves. Use session_list to browse recent sessions and session_read when you need the raw transcript details from a specific session."*
 
 ## Per-Platform Session Tracking
 
