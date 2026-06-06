@@ -152,6 +152,9 @@ MEMORY_GUIDANCE = (
     "Prioritize what reduces future user steering — the most valuable memory is one "
     "that prevents the user from having to correct or remind you again. "
     "User preferences and recurring corrections matter more than procedural task details.\n"
+    "Use the right recall layer: memory for stable facts about the user/environment, "
+    "session_search/session_list/session_read for past conversations and previous fixes, "
+    "and knowledge_search/knowledge_read for local notes or indexed documents.\n"
     "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
     "state to memory; use session_search to recall those from past transcripts. "
     "Specifically: do not record PR numbers, issue numbers, commit SHAs, 'fixed bug X', "
@@ -170,7 +173,10 @@ MEMORY_GUIDANCE = (
 SESSION_SEARCH_GUIDANCE = (
     "When the user references something from a past conversation or you suspect "
     "relevant cross-session context exists, use session_search to recall it before "
-    "asking them to repeat themselves."
+    "asking them to repeat themselves. Use session_list to browse recent sessions and "
+    "session_read when you need the raw transcript details from a specific session. "
+    "Use knowledge_search/knowledge_read instead when the answer is more likely to be "
+    "in local notes or indexed documents than in a past conversation."
 )
 
 SKILLS_GUIDANCE = (

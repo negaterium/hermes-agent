@@ -39,6 +39,8 @@ _HERMES_CORE_TOOLS = [
     "read_terminal", "close_terminal",
     # File manipulation
     "read_file", "write_file", "patch", "search_files",
+    # Local knowledge recall
+    "knowledge_search", "knowledge_read",
     # Vision + image generation
     "vision_analyze", "image_generate",
     # Skills
@@ -58,7 +60,7 @@ _HERMES_CORE_TOOLS = [
     # GUI gateway (tui_gateway/server.py::_load_enabled_toolsets) — keeping them
     # off every CLI/messaging/cron schema (narrow waist).
     # Session history search
-    "session_search",
+    "session_search", "session_list", "session_read",
     # Clarifying questions
     "clarify",
     # Code execution + delegation
@@ -192,7 +194,13 @@ TOOLSETS = {
         "tools": ["read_file", "write_file", "patch", "search_files"],
         "includes": []
     },
-    
+
+    "knowledge": {
+        "description": "Local knowledge-base recall tools backed by qmd",
+        "tools": ["knowledge_search", "knowledge_read"],
+        "includes": []
+    },
+
     "tts": {
         "description": "Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, OpenAI, or xAI",
         "tools": ["text_to_speech"],
@@ -219,7 +227,7 @@ TOOLSETS = {
     
     "session_search": {
         "description": "Search and recall past conversations with summarization",
-        "tools": ["session_search"],
+        "tools": ["session_search", "session_list", "session_read"],
         "includes": []
     },
 
