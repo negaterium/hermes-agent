@@ -609,7 +609,7 @@ class MemoryStore:
         return resp
 
     def _render_block(self, target: str, entries: List[str]) -> str:
-        """Render a system prompt block with header and usage indicator."""
+        """Render a compact system-prompt block."""
         if not entries:
             return ""
 
@@ -619,12 +619,11 @@ class MemoryStore:
         pct = min(100, int((current / limit) * 100)) if limit > 0 else 0
 
         if target == "user":
-            header = f"USER PROFILE (who the user is) [{pct}% — {current:,}/{limit:,} chars]"
+            header = f"USER PROFILE [{pct}% {current:,}/{limit:,}]"
         else:
-            header = f"MEMORY (your personal notes) [{pct}% — {current:,}/{limit:,} chars]"
+            header = f"MEMORY [{pct}% {current:,}/{limit:,}]"
 
-        separator = "═" * 46
-        return f"{separator}\n{header}\n{separator}\n{content}"
+        return f"{header}\n{content}"
 
     @staticmethod
     def _read_file(path: Path) -> List[str]:

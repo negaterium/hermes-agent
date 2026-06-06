@@ -24,7 +24,7 @@ import run_agent
 from run_agent import AIAgent
 from agent.error_classifier import FailoverReason
 from agent.memory_manager import MemoryManager
-from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
+from agent.prompt_builder import DEFAULT_AGENT_IDENTITY, HERMES_AGENT_HELP_GUIDANCE
 
 
 # ---------------------------------------------------------------------------
@@ -1099,6 +1099,14 @@ class TestBuildSystemPrompt:
         prompt = agent._build_system_prompt(system_message="Custom instruction")
         assert "Custom instruction" in prompt
 
+    def test_hermes_help_guidance_only_when_skill_view_loaded(self, agent):
+        prompt = agent._build_system_prompt()
+        assert HERMES_AGENT_HELP_GUIDANCE not in prompt
+
+        agent.valid_tool_names.add("skill_view")
+        prompt = agent._build_system_prompt()
+        assert HERMES_AGENT_HELP_GUIDANCE in prompt
+
     def test_memory_guidance_when_memory_tool_loaded(self, agent_with_memory_tool):
         from agent.prompt_builder import MEMORY_GUIDANCE
 
@@ -1175,6 +1183,109 @@ class TestBuildSystemPrompt:
         assert "SKILLS_PROMPT" in prompt
         assert mock_skills.call_args.kwargs["available_tools"] == set(toolset_map)
         assert mock_skills.call_args.kwargs["available_toolsets"] == {"web", "skills"}
+
+    def test_first_turn_tool_gating_keeps_relevant_tools(self):
+        tools = _make_tool_defs(
+            "clarify",
+            "cronjob",
+            "delegate_task",
+            "image_generate",
+            "memory",
+            "read_file",
+            "search_files",
+            "send_message",
+            "skill_manage",
+            "skill_view",
+            "skills_list",
+            "terminal",
+            "text_to_speech",
+            "todo",
+        )
+        toolset_map = {
+            "clarify": "clarify",
+            "cronjob": "cronjob",
+            "delegate_task": "delegation",
+            "image_generate": "image_gen",
+            "memory": "memory",
+            "read_file": "file",
+            "search_files": "file",
+            "send_message": "messaging",
+            "skill_manage": "skills",
+            "skill_view": "skills",
+            "skills_list": "skills",
+            "terminal": "terminal",
+            "text_to_speech": "tts",
+            "todo": "todo",
+        }
+
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, side_effect=toolset_map.get),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            agent._maybe_specialize_tool_surface_for_query(
+                "Set a daily Telegram reminder and send me a recurring report"
+            )
+
+        assert {"cronjob", "send_message"}.issubset(agent.valid_tool_names)
+        assert {"clarify", "memory", "read_file", "search_files", "skill_view", "skills_list", "todo"}.issubset(agent.valid_tool_names)
+        assert "delegate_task" not in agent.valid_tool_names
+        assert "image_generate" not in agent.valid_tool_names
+        assert len(agent.valid_tool_names) < len(toolset_map)
+        assert agent._tool_gating_summary is not None
+
+    def test_first_turn_tool_gating_skips_vague_queries(self):
+        tools = _make_tool_defs(
+            "clarify",
+            "cronjob",
+            "delegate_task",
+            "memory",
+            "read_file",
+            "search_files",
+            "skill_view",
+            "skills_list",
+            "terminal",
+            "todo",
+        )
+        toolset_map = {
+            "clarify": "clarify",
+            "cronjob": "cronjob",
+            "delegate_task": "delegation",
+            "memory": "memory",
+            "read_file": "file",
+            "search_files": "file",
+            "skill_view": "skills",
+            "skills_list": "skills",
+            "terminal": "terminal",
+            "todo": "todo",
+        }
+
+        with (
+            patch("run_agent.get_tool_definitions", return_value=tools),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.get_toolset_for_tool", create=True, side_effect=toolset_map.get),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            original_names = set(agent.valid_tool_names)
+            agent._maybe_specialize_tool_surface_for_query("Go")
+
+        assert agent.valid_tool_names == original_names
+        assert agent._tool_gating_summary is None
 
 
 class TestToolUseEnforcementConfig:
@@ -1327,6 +1438,40 @@ class TestToolUseEnforcementConfig:
         )
         prompt = agent._build_system_prompt()
         assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
+
+    def test_openai_guidance_omits_terminal_examples_when_terminal_tool_missing(self):
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                return_value=_make_tool_defs("read_file", "search_files", "web_search"),
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "hermes_cli.config.load_config",
+                return_value={"agent": {"tool_use_enforcement": "auto"}},
+            ),
+        ):
+            a = AIAgent(
+                model="openai/gpt-4.1",
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            a.client = MagicMock()
+            prompt = a._build_system_prompt().lower()
+
+        assert "what time is it?" not in prompt
+        assert "hashes, encodings, checksums" not in prompt
+        assert "current facts" in prompt
+
+    def test_openai_guidance_keeps_terminal_examples_when_terminal_tool_present(self):
+        agent = self._make_agent(model="openai/gpt-4.1", tool_use_enforcement="auto")
+        prompt = agent._build_system_prompt().lower()
+        assert "what time is it?" in prompt
+        assert "hashes, encodings, checksums" in prompt
 
     def test_no_tools_never_injects(self):
         """Even with enforcement=true, no injection when agent has no tools."""

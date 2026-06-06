@@ -18,6 +18,10 @@ from agent.prompt_builder import (
     build_skills_system_prompt,
     build_nous_subscription_prompt,
     build_context_files_prompt,
+    build_environment_hints,
+    build_openai_model_execution_guidance,
+    build_google_model_operational_guidance,
+    build_platform_hint,
     CONTEXT_FILE_MAX_CHARS,
     _dynamic_context_file_max_chars,
     _get_context_file_max_chars,
@@ -629,6 +633,49 @@ class TestBuildSkillsSystemPrompt:
         result = build_skills_system_prompt()
         assert "backend-skill" in result
 
+    def test_query_mode_prefilters_to_relevant_candidates(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skills_dir = tmp_path / "skills"
+
+        py = skills_dir / "coding" / "python-debug"
+        py.mkdir(parents=True)
+        (py / "SKILL.md").write_text(
+            "---\nname: python-debug\ndescription: Debug Python scripts\n---\n"
+        )
+
+        kube = skills_dir / "devops" / "kubernetes"
+        kube.mkdir(parents=True)
+        (kube / "SKILL.md").write_text(
+            "---\nname: kubernetes\ndescription: Operate Kubernetes clusters\n---\n"
+        )
+
+        result = build_skills_system_prompt(query="Need to debug a Python traceback")
+        assert "<candidate_skills>" in result
+        assert "python-debug" in result
+        assert "kubernetes" not in result
+
+    def test_query_mode_falls_back_to_compact_catalog_when_no_matches(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skills_dir = tmp_path / "skills"
+
+        one = skills_dir / "coding" / "python-debug"
+        one.mkdir(parents=True)
+        (one / "SKILL.md").write_text(
+            "---\nname: python-debug\ndescription: Debug Python scripts\n---\n"
+        )
+
+        two = skills_dir / "ops" / "kubernetes"
+        two.mkdir(parents=True)
+        (two / "SKILL.md").write_text(
+            "---\nname: kubernetes\ndescription: Operate Kubernetes clusters\n---\n"
+        )
+
+        result = build_skills_system_prompt(query="zxqv plasma entropy")
+        assert "No high-confidence skill matches" in result
+        assert "python-debug" in result
+        assert "kubernetes" in result
+        assert "Debug Python scripts" not in result
+
 
 class TestBuildNousSubscriptionPrompt:
     def test_includes_active_subscription_features(self, monkeypatch):
@@ -1082,6 +1129,34 @@ class TestPromptBuilderConstants:
         assert "Markdown" in hint
         assert "absolute" in hint
 
+    def test_build_platform_hint_trims_telegram_media_without_media_tools(self):
+        hint = build_platform_hint("telegram", {"read_file", "search_files"})
+        assert "Telegram has no table syntax" in hint
+        assert "MEDIA:" not in hint
+
+    def test_build_platform_hint_keeps_telegram_media_with_media_tools(self):
+        hint = build_platform_hint("telegram", {"terminal", "read_file"})
+        assert "include MEDIA:" in hint
+
+    def test_build_platform_hint_trims_signal_media_without_media_tools(self):
+        hint = build_platform_hint("signal", {"read_file", "search_files"})
+        assert hint == "You are on Signal. Do not use markdown."
+
+    def test_build_platform_hint_trims_discord_media_without_media_tools(self):
+        hint = build_platform_hint("discord", {"read_file", "search_files"})
+        assert hint == "You are in Discord."
+
+    def test_build_platform_hint_trims_matrix_media_without_media_tools(self):
+        hint = build_platform_hint("matrix", {"read_file", "search_files"})
+        assert hint == "You are in Matrix. Markdown works and is converted to rich display."
+
+    def test_build_platform_hint_keeps_feishu_media_with_media_tools(self):
+        hint = build_platform_hint("feishu", {"write_file", "read_file"})
+        assert "MEDIA:" in hint
+
+    def test_build_platform_hint_unknown_platform_empty(self):
+        assert build_platform_hint("unknown-platform", {"terminal"}) == ""
+
 
 # =========================================================================
 # Environment hints
@@ -1510,6 +1585,34 @@ class TestOpenAIModelExecutionGuidance:
     def test_guidance_is_string(self):
         assert isinstance(OPENAI_MODEL_EXECUTION_GUIDANCE, str)
         assert len(OPENAI_MODEL_EXECUTION_GUIDANCE) > 100
+
+    def test_builder_trims_terminal_only_instructions_when_terminal_missing(self):
+        text = build_openai_model_execution_guidance({"read_file", "search_files", "web_search"}).lower()
+        assert "what time is it?" not in text
+        assert "hashes, encodings, checksums" not in text
+        assert "current facts" in text
+        assert "file contents, sizes, line counts" in text
+
+    def test_builder_retains_terminal_specific_examples_when_terminal_present(self):
+        text = build_openai_model_execution_guidance({"terminal", "read_file"}).lower()
+        assert "what time is it?" in text
+        assert "hashes, encodings, checksums" in text
+        assert "git history, branches, diffs" in text
+
+
+class TestGoogleModelOperationalGuidance:
+    def test_builder_trims_file_and_terminal_lines_when_tools_missing(self):
+        text = build_google_model_operational_guidance({"web_search"}).lower()
+        assert "absolute paths" not in text
+        assert "verify first" not in text
+        assert "non-interactive commands" not in text
+        assert "parallel tool calls" in text
+
+    def test_builder_keeps_file_and_terminal_lines_when_available(self):
+        text = build_google_model_operational_guidance({"terminal", "read_file"}).lower()
+        assert "absolute paths" in text
+        assert "verify first" in text
+        assert "non-interactive commands" in text
 
 
 class TestParallelToolCallGuidance:
