@@ -306,14 +306,16 @@ def do_safe_sync(dry_run: bool) -> int:
     print(f"LOCAL: {LOCAL}")
     print(f"DRY_RUN: {dry_run}")
     print(f"SNAPSHOT: {snapshot_path}")
-    print("PULL_EXCLUDES:")
-    for pattern in PULL_EXCLUDES:
-        print(f"  - {pattern}")
-    print("PUSH_SUBTREES:")
-    for subtree in HERMES_PUSH_SUBTREES:
-        print(f"  - {subtree}")
-    print("STAGES:")
-    print(json.dumps(stage_summaries, indent=2))
+    print("PULL_EXCLUDES: .obsidian/, AI/Memory/, AI/Sessions/")
+    print("PUSH_SUBTREES: AI/Memory, AI/Sessions")
+    if overall_rc == 0:
+        print("SUMMARY: safe-sync completed successfully")
+    else:
+        print("STAGES:")
+        for stage in stage_summaries:
+            print(f"- {stage['subtree']}: rc={stage['returncode']}")
+            if stage.get("summary"):
+                print(stage["summary"])
 
     return overall_rc
 
@@ -382,11 +384,15 @@ def do_push_ai(dry_run: bool) -> int:
     print(f"LOCAL: {LOCAL}")
     print(f"DRY_RUN: {dry_run}")
     print(f"SNAPSHOT: {snapshot_path}")
-    print("PUSH_SUBTREES:")
-    for subtree in HERMES_PUSH_SUBTREES:
-        print(f"  - {subtree}")
-    print("STAGES:")
-    print(json.dumps(summaries, indent=2))
+    print("PUSH_SUBTREES: AI/Memory, AI/Sessions")
+    if overall_rc == 0:
+        print("SUMMARY: push-ai completed successfully")
+    else:
+        print("STAGES:")
+        for stage in summaries:
+            print(f"- {stage['subtree']}: rc={stage['returncode']}")
+            if stage.get("summary"):
+                print(stage["summary"])
     return overall_rc
 
 
