@@ -761,21 +761,16 @@ PLATFORM_HINTS = {
         "image links are sent as photos."
     ),
     "whatsapp_cloud": (
-        "You are on a text messaging communication platform, WhatsApp "
-        "(via Meta's official Business Cloud API). Standard markdown "
-        "(**bold**, ~~strike~~, # headers, [links](url)) is auto-converted "
-        "to WhatsApp's native syntax (*bold*, ~strike~, etc.) — feel free "
-        "to write in markdown. Tables are NOT supported — prefer bullet "
-        "lists or labeled key:value pairs. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
-        "in your response. Images (.jpg, .png) become photo attachments, "
-        "videos (.mp4) play inline, audio (.mp3, .ogg) sends as voice/audio "
-        "messages, other files arrive as documents. Image URLs in markdown "
-        "format ![alt](url) also work. "
-        "IMPORTANT: this platform has a 24-hour conversation window — if the "
-        "user hasn't messaged in 24h, free-form replies are refused by Meta "
-        "(error 131047). This rarely matters for live chat, but is worth "
-        "knowing if you're scheduling a delayed message."
+        "You are on WhatsApp (via Meta's official Business Cloud API). Standard markdown "
+        "(**bold**, ~~strike~~, # headers, [links](url)) is auto-converted to WhatsApp's "
+        "native syntax, so you may write in markdown. Tables are not supported; prefer "
+        "bullet lists or labeled key:value pairs. To send a file, include "
+        "MEDIA:/absolute/path/to/file in your response. Images become photo attachments, "
+        "videos play inline, audio sends as voice/audio messages, other files arrive as "
+        "documents, and image URLs in markdown format ![alt](url) also work. IMPORTANT: "
+        "this platform has a 24-hour conversation window. If the user has not messaged in "
+        "24h, free-form replies are refused by Meta (error 131047), which mainly matters "
+        "for delayed or scheduled messages."
     ),
     "telegram": (
         "You are on a text messaging communication platform, Telegram. "
@@ -1661,13 +1656,14 @@ def _skill_should_show(
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
+    compact_categories: "frozenset[str] | None" = None,
     query: str | None = None,
     candidate_limit: int = _DEFAULT_SKILL_CANDIDATE_LIMIT,
 ) -> str:
     """Build a compact skill index for the system prompt.
 
     Two-layer cache:
-      1. In-process LRU dict keyed by (skills_dir, tools, toolsets)
+      1. In-process LRU dict keyed by (skills_dir, tools, toolsets, hidden)
       2. Disk snapshot (``.skills_prompt_snapshot.json``) validated by
          mtime/size manifest — survives process restarts
 
@@ -1701,6 +1697,7 @@ def build_skills_system_prompt(
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint,
         tuple(sorted(disabled)),
+        tuple(sorted(compact_categories or ())),
         (query or "").strip().lower(),
         int(candidate_limit),
     )
@@ -1843,6 +1840,18 @@ def build_skills_system_prompt(
     if not skills_by_category:
         result = ""
     else:
+        demoted = frozenset(
+            cat
+            for cat in skills_by_category
+            if cat.split("/", 1)[0] in (compact_categories or frozenset())
+        )
+        hidden_note = ""
+        if demoted:
+            hidden_note = (
+                "\n(Categories marked [names only] are outside the current coding "
+                "context, so their descriptions are omitted — the skills work "
+                "normally and load with skill_view(name) as usual.)"
+            )
         query = (query or "").strip()
         if query:
             selected_entries = _select_skill_candidates(
@@ -1892,10 +1901,26 @@ def build_skills_system_prompt(
                     "</available_skills>\n"
                 )
         else:
-            index_lines = _render_skill_entries_by_category(
-                available_skill_entries,
-                category_descriptions,
-            )
+            index_lines = []
+            for category in sorted(skills_by_category.keys()):
+                seen = set()
+                if category in demoted:
+                    names = sorted({name for name, _ in skills_by_category[category]})
+                    index_lines.append(f"  {category} [names only]: {', '.join(names)}")
+                    continue
+                cat_desc = category_descriptions.get(category, "")
+                if cat_desc:
+                    index_lines.append(f"  {category}: {cat_desc}")
+                else:
+                    index_lines.append(f"  {category}:")
+                for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
+                    if name in seen:
+                        continue
+                    seen.add(name)
+                    if desc:
+                        index_lines.append(f"    - {name}: {desc}")
+                    else:
+                        index_lines.append(f"    - {name}")
             result = (
                 "## Skills (mandatory)\n"
                 "Before replying, scan the skills below. If a skill matches or is even partially relevant "
@@ -1923,6 +1948,7 @@ def build_skills_system_prompt(
                 "</available_skills>\n"
                 "\n"
                 "Only proceed without loading a skill if genuinely none are relevant to the task."
+                + hidden_note
             )
 
     # ── Store in LRU cache ────────────────────────────────────────────
@@ -1986,13 +2012,13 @@ def build_nous_subscription_prompt(valid_tool_names: "set[str] | None" = None) -
 
     lines = [
         "# Nous Subscription",
-        "Nous subscription includes managed web tools (Firecrawl), image generation (FAL), OpenAI TTS, and browser automation (Browser Use) by default. Modal execution is optional.",
+        "Nous subscription includes managed web tools (Firecrawl), image generation (FAL), OpenAI TTS, OpenAI Whisper STT, and browser automation (Browser Use) by default. Modal execution is optional.",
         "Current capability status:",
     ]
     lines.extend(_status_line(feature) for feature in features.items())
     lines.extend(
         [
-            "When a Nous-managed feature is active, do not ask the user for Firecrawl, FAL, OpenAI TTS, or Browser-Use API keys.",
+            "When a Nous-managed feature is active, do not ask the user for Firecrawl, FAL, OpenAI TTS, OpenAI Whisper, or Browser-Use API keys.",
             "If the user is not subscribed and asks for a capability that Nous subscription would unlock or simplify, suggest Nous subscription as one option alongside direct setup or local alternatives.",
             "Do not mention subscription unless the user asks about it or it directly solves the current missing capability.",
             "Useful commands: hermes setup, hermes setup tools, hermes setup terminal, hermes status.",
