@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VAULT="${VAULT:-/root/obsidian-vault}"
+HOME_DIR="${HOME:-/root}"
+HERMES_HOME_DIR="${HERMES_HOME:-$HOME_DIR/.hermes}"
+VAULT="${VAULT:-${OBSIDIAN_VAULT:-$HOME_DIR/obsidian-vault}}"
 REMOTE="${REMOTE:-onedrive:Documents/Obsidian Vault}"
 RCLONE_BIN="${RCLONE_BIN:-/usr/bin/rclone}"
-RCLONE_CONF="${RCLONE_CONF:-/root/.hermes/rclone-writable.conf}"
-CACHE_DIR="${RCLONE_CACHE_DIR:-/root/.hermes/cache/rclone}"
-LOG_FILE="${LOG_FILE:-/root/.hermes/logs/obsidian-sync.log}"
-PY_SYNC="${PY_SYNC:-/root/.hermes/scripts/obsidian_sync.py}"
+RCLONE_CONF="${RCLONE_CONF:-$HERMES_HOME_DIR/rclone-writable.conf}"
+CACHE_DIR="${RCLONE_CACHE_DIR:-$HERMES_HOME_DIR/cache/rclone}"
+LOG_FILE="${LOG_FILE:-$HERMES_HOME_DIR/logs/obsidian-sync.log}"
+PY_SYNC="${PY_SYNC:-$HERMES_HOME_DIR/scripts/obsidian_sync.py}"
 ACTION="${1:-safe-sync}"
 
 mkdir -p "$(dirname "$LOG_FILE")" "$CACHE_DIR"

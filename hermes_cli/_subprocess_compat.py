@@ -27,12 +27,14 @@ guarantee.
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 from typing import Sequence
 
 __all__ = [
     "IS_WINDOWS",
+    "explicit_shell_argv",
     "resolve_node_command",
     "windows_detach_flags",
     "windows_detach_flags_without_breakaway",
@@ -42,6 +44,36 @@ __all__ = [
 
 
 IS_WINDOWS = sys.platform == "win32"
+
+
+# -----------------------------------------------------------------------------
+# Shell launcher resolution
+# -----------------------------------------------------------------------------
+
+
+def explicit_shell_argv(command: str) -> list[str]:
+    """Return an explicit shell argv for operator-owned shell snippets.
+
+    Prefer bash when available so callers keep familiar shell syntax without
+    relying on Python's ``shell=True``. On Windows, try Hermes' richer bash
+    discovery first, then fall back to ``cmd.exe /c`` when no bash is present.
+    """
+    shell = ""
+    try:
+        from tools.environments.local import _find_bash
+
+        shell = _find_bash() or ""
+    except Exception:
+        shell = shutil.which("bash") or os.environ.get("SHELL") or ""
+
+    if shell:
+        shell_name = os.path.basename(shell).lower()
+        return [shell, "-lc" if "bash" in shell_name else "-c", command]
+
+    if IS_WINDOWS:
+        return [os.environ.get("COMSPEC") or "cmd.exe", "/d", "/s", "/c", command]
+
+    return [os.environ.get("SHELL") or "/bin/sh", "-c", command]
 
 
 # -----------------------------------------------------------------------------

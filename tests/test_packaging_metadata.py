@@ -362,14 +362,16 @@ def test_darkserver_repo_keeps_obsidian_sync_python_script_and_installs_it_on_st
     assert '"path1 and path2 are out of sync"' in repo_script
     assert "refusing automatic --resync to protect vault state" in repo_script
     assert 'cmd = ["rclone", "bisync", REMOTE, LOCAL, common, "--resync"]' not in repo_script
-    assert "/root/.hermes/scripts/obsidian_sync.py" in startup
+    assert 'HERMES_HOME_DIR="${HERMES_HOME:-$HOME_DIR/.hermes}"' in startup
+    assert 'OBS_SYNC_SCRIPT_DST="${OBS_SYNC_SCRIPT_DST:-$HERMES_HOME_DIR/scripts/obsidian_sync.py}"' in startup
     assert "install -m 0755" in startup
 
 
 def test_darkserver_shell_helper_delegates_to_python_safe_sync_helper():
     shell_script = (REPO_ROOT / "scripts" / "obsidian-sync.sh").read_text(encoding="utf-8")
 
-    assert 'PY_SYNC="${PY_SYNC:-/root/.hermes/scripts/obsidian_sync.py}"' in shell_script
+    assert 'HERMES_HOME_DIR="${HERMES_HOME:-$HOME_DIR/.hermes}"' in shell_script
+    assert 'PY_SYNC="${PY_SYNC:-$HERMES_HOME_DIR/scripts/obsidian_sync.py}"' in shell_script
     assert 'ACTION="${1:-safe-sync}"' in shell_script
     assert "exec /usr/bin/env python3" in shell_script
     assert "safe-sync|sync|auto|pull|push-ai|push|bisync" in shell_script

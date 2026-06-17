@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VAULT="${VAULT:-/root/obsidian-vault}"
+HOME_DIR="${HOME:-/root}"
+HERMES_HOME_DIR="${HERMES_HOME:-$HOME_DIR/.hermes}"
+VAULT="${VAULT:-${OBSIDIAN_VAULT:-$HOME_DIR/obsidian-vault}}"
 QMD_COLLECTION_NAME="${QMD_COLLECTION_NAME:-obsidian}"
-QMD_LOG_DIR="${QMD_LOG_DIR:-/root/.hermes/logs}"
+QMD_LOG_DIR="${QMD_LOG_DIR:-$HERMES_HOME_DIR/logs}"
 QMD_LOG_FILE="${QMD_LOG_FILE:-$QMD_LOG_DIR/qmd-embed.log}"
-QMD_DATA_DIR="${QMD_DATA_DIR:-/root/.hermes/qmd}"
+QMD_DATA_DIR="${QMD_DATA_DIR:-$HERMES_HOME_DIR/qmd}"
 OBS_SYNC_SCRIPT_SRC="/app/scripts/obsidian_sync.py"
-OBS_SYNC_SCRIPT_DST="/root/.hermes/scripts/obsidian_sync.py"
+OBS_SYNC_SCRIPT_DST="${OBS_SYNC_SCRIPT_DST:-$HERMES_HOME_DIR/scripts/obsidian_sync.py}"
 
 mkdir -p "$QMD_LOG_DIR" "$QMD_DATA_DIR" "$(dirname "$OBS_SYNC_SCRIPT_DST")"
 

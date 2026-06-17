@@ -799,10 +799,12 @@ def _run_cua_driver_installer(label: str = "Installing", verbose: bool = True) -
     import shutil
     import subprocess
 
-    install_cmd = (
-        "/bin/bash -c \"$(curl -fsSL "
+    install_script_url = (
         "https://raw.githubusercontent.com/trycua/cua/main/"
-        "libs/cua-driver/scripts/install.sh)\""
+        "libs/cua-driver/scripts/install.sh"
+    )
+    manual_cmd = (
+        f"/bin/bash -c \"$(curl -fsSL {install_script_url})\""
     )
     if verbose:
         _print_info(f"    {label} cua-driver (macOS background computer-use)...")
@@ -810,7 +812,19 @@ def _run_cua_driver_installer(label: str = "Installing", verbose: bool = True) -
         _print_info(f"    {label} cua-driver...")
     driver_cmd = _cua_driver_cmd()
     try:
-        result = subprocess.run(install_cmd, shell=True, timeout=300)
+        download = subprocess.run(
+            ["curl", "-fsSL", install_script_url],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+        result = subprocess.run(
+            ["/bin/bash"],
+            input=download.stdout,
+            text=True,
+            timeout=300,
+        )
         if result.returncode == 0 and shutil.which(driver_cmd):
             if verbose:
                 _print_success(f"    {driver_cmd} installed.")
@@ -820,10 +834,14 @@ def _run_cua_driver_installer(label: str = "Installing", verbose: bool = True) -
                 _print_info("    Both must allow the terminal / Hermes process.")
             return True
         _print_warning(f"    cua-driver {label.lower()} did not complete. Re-run manually:")
-        _print_info(f"      {install_cmd}")
+        _print_info(f"      {manual_cmd}")
         return False
     except subprocess.TimeoutExpired:
         _print_warning(f"    cua-driver {label.lower()} timed out. Re-run manually.")
+        return False
+    except subprocess.CalledProcessError as e:
+        _print_warning(f"    cua-driver {label.lower()} failed to download installer (exit {e.returncode}).")
+        _print_info(f"      {manual_cmd}")
         return False
     except Exception as e:
         _print_warning(f"    cua-driver {label.lower()} failed: {e}")

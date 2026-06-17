@@ -17,6 +17,7 @@ must:
 from __future__ import annotations
 
 import json
+import subprocess
 from unittest.mock import MagicMock, patch
 
 
@@ -90,6 +91,39 @@ class TestInstallCuaDriverUpgrade:
              patch.object(tools_config, "_run_cua_driver_installer",
                           return_value=True) as runner:
             assert tools_config.install_cua_driver(upgrade=False) is True
+
+
+class TestRunCuaDriverInstaller:
+    def test_downloads_with_curl_and_executes_via_bash_stdin(self):
+        from hermes_cli import tools_config
+
+        download = MagicMock(returncode=0, stdout="echo ok\n")
+        execute = MagicMock(returncode=0)
+
+        with patch.object(tools_config.shutil, "which", return_value="/usr/local/bin/cua-driver"), \
+             patch("subprocess.run", side_effect=[download, execute]) as run:
+            assert tools_config._run_cua_driver_installer(verbose=False) is True
+
+        assert run.call_count == 2
+        assert run.call_args_list[0].args[0] == [
+            "curl", "-fsSL",
+            "https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh",
+        ]
+        assert run.call_args_list[1].args[0] == ["/bin/bash"]
+        assert run.call_args_list[1].kwargs["input"] == "echo ok\n"
+        assert run.call_args_list[1].kwargs["text"] is True
+
+    def test_download_failure_reports_manual_command(self):
+        from hermes_cli import tools_config
+
+        with patch("subprocess.run", side_effect=subprocess.CalledProcessError(22, ["curl"])), \
+             patch.object(tools_config, "_print_warning") as warn, \
+             patch.object(tools_config, "_print_info") as info:
+            assert tools_config._run_cua_driver_installer(verbose=False) is False
+
+        warn.assert_called()
+        assert "failed to download installer" in warn.call_args.args[0]
+        assert "curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh" in info.call_args.args[0]
 
 
 class TestCheckCuaDriverAssetForArch:

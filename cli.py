@@ -7669,13 +7669,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 qcmd = quick_commands[base_cmd.lstrip("/")]
                 if qcmd.get("type") == "exec":
                     import subprocess
+                    from hermes_cli._subprocess_compat import explicit_shell_argv
                     exec_cmd = qcmd.get("command", "")
                     if exec_cmd:
                         try:
-                            # shell=True is intentional: quick_commands are user-defined
-                            # shell snippets from config.yaml — not agent/LLM controlled.
                             result = subprocess.run(
-                                exec_cmd, shell=True, capture_output=True,
+                                explicit_shell_argv(exec_cmd), capture_output=True,
                                 text=True, timeout=30
                             )
                             output = result.stdout.strip() or result.stderr.strip()

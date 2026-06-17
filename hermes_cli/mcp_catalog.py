@@ -34,6 +34,7 @@ import yaml
 
 from hermes_constants import get_hermes_home, get_optional_mcps_dir
 from hermes_cli.colors import Colors, color
+from hermes_cli._subprocess_compat import explicit_shell_argv
 from hermes_cli.config import (
     load_config,
     save_config,
@@ -364,7 +365,7 @@ def _run_bootstrap(cwd: Path, commands: List[str]) -> None:
     """
     for cmd in commands:
         print(color(f"  $ {cmd}", Colors.DIM))
-        proc = subprocess.run(cmd, cwd=str(cwd), shell=True)
+        proc = subprocess.run(explicit_shell_argv(cmd), cwd=str(cwd), stdin=subprocess.DEVNULL)
         if proc.returncode != 0:
             raise CatalogError(
                 f"bootstrap step failed (exit {proc.returncode}): {cmd}"

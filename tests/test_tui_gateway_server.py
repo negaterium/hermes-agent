@@ -3949,6 +3949,81 @@ def test_command_dispatch_exec_nonzero_surfaces_error(monkeypatch):
     assert "failed" in resp["error"]["message"]
 
 
+def test_command_dispatch_exec_uses_explicit_shell_argv(monkeypatch):
+    calls = {}
+
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {"quick_commands": {"boom": {"type": "exec", "command": "printf ok"}}},
+    )
+    monkeypatch.setattr(server, "_shell_exec_argv", lambda cmd: ["/bin/bash", "-lc", cmd])
+
+    def fake_run(*args, **kwargs):
+        calls["args"] = args
+        calls["kwargs"] = kwargs
+        return types.SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    resp = server.handle_request(
+        {"id": "11", "method": "command.dispatch", "params": {"name": "boom"}}
+    )
+
+    assert resp is not None
+    assert resp.get("result") is not None
+    assert resp["result"]["output"] == "ok"
+    assert calls["args"][0] == ["/bin/bash", "-lc", "printf ok"]
+    assert "shell" not in calls["kwargs"]
+
+
+def test_shell_exec_uses_explicit_shell_argv(monkeypatch):
+    calls = {}
+
+    monkeypatch.setattr(server, "_shell_exec_argv", lambda cmd: ["/bin/bash", "-lc", cmd])
+
+    def fake_run(*args, **kwargs):
+        calls["args"] = args
+        calls["kwargs"] = kwargs
+        return types.SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+
+    fake_approval = types.SimpleNamespace(
+        detect_hardline_command=lambda cmd: (False, ""),
+        detect_dangerous_command=lambda cmd: (False, None, ""),
+    )
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    with patch.dict(sys.modules, {"tools.approval": fake_approval}):
+        resp = server.handle_request(
+            {"id": "1", "method": "shell.exec", "params": {"command": "printf ok"}}
+        )
+
+    assert resp is not None
+    assert resp.get("result") is not None
+    assert resp["result"]["stdout"] == "ok\n"
+    assert calls["args"][0] == ["/bin/bash", "-lc", "printf ok"]
+    assert "shell" not in calls["kwargs"]
+
+
+def test_shell_exec_blocks_dangerous_command_before_spawn(monkeypatch):
+    fake_approval = types.SimpleNamespace(
+        detect_hardline_command=lambda cmd: (False, ""),
+        detect_dangerous_command=lambda cmd: (True, None, "recursive delete of system directory"),
+    )
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("subprocess.run should not be called")
+
+    monkeypatch.setattr(server.subprocess, "run", fail_run)
+    with patch.dict(sys.modules, {"tools.approval": fake_approval}):
+        resp = server.handle_request(
+            {"id": "2", "method": "shell.exec", "params": {"command": "rm -rf /root"}}
+        )
+
+    assert "error" in resp
+    assert resp["error"]["code"] == 4005
+    assert "recursive delete of system directory" in resp["error"]["message"]
+
+
 def test_plugins_list_surfaces_loader_error(monkeypatch):
     with patch("hermes_cli.plugins.get_plugin_manager", side_effect=Exception("boom")):
         resp = server.handle_request(

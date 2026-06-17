@@ -11,23 +11,25 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Europe/Bucharest")
-STATE = Path("/root/.hermes/cache/evening-routine-last-sent.json")
+HOME_DIR = Path.home()
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(HOME_DIR / ".hermes")))
+VAULT = Path(os.environ.get("VAULT", os.environ.get("OBSIDIAN_VAULT", str(HOME_DIR / "obsidian-vault"))))
+STATE = HERMES_HOME / "cache" / "evening-routine-last-sent.json"
 TARGET_START = time(23, 0)
 TARGET_END = time(23, 59, 59)
-VAULT = Path("/root/obsidian-vault")
 REMOTE_ROOT = "onedrive:Documents/Obsidian Vault"
 RCLONE_BIN = "/usr/bin/rclone"
-RCLONE_CONF = "/root/.hermes/rclone-writable.conf"
-OBS_SYNC = Path("/root/.local/bin/obsidian-sync.sh")
+RCLONE_CONF = os.environ.get("RCLONE_CONF", str(HERMES_HOME / "rclone-writable.conf"))
+OBS_SYNC = Path(os.environ.get("OBS_SYNC", str(HERMES_HOME / "bin" / "obsidian-sync.sh")))
 PYTHON_BIN = (
     "/app/venv/bin/python3"
     if Path("/app/venv/bin/python3").exists()
     else "/usr/bin/python3"
 )
-GARMIN_CLI = [PYTHON_BIN, "/root/.hermes/skills/garmin/garmin-cli.py"]
-PORTAINER = [PYTHON_BIN, "/root/.hermes/skills/unraid/portainer-cli.py"]
-UNRAID = [PYTHON_BIN, "/root/.hermes/skills/unraid/unraid-api.py"]
-GOOGLE_API = [PYTHON_BIN, "/root/.hermes/skills/productivity/google-workspace/scripts/google_api.py"]
+GARMIN_CLI = [PYTHON_BIN, str(HERMES_HOME / "skills" / "garmin" / "garmin-cli.py")]
+PORTAINER = [PYTHON_BIN, str(HERMES_HOME / "skills" / "unraid" / "portainer-cli.py")]
+UNRAID = [PYTHON_BIN, str(HERMES_HOME / "skills" / "unraid" / "unraid-api.py")]
+GOOGLE_API = [PYTHON_BIN, str(HERMES_HOME / "skills" / "productivity" / "google-workspace" / "scripts" / "google_api.py")]
 
 
 def run(
@@ -107,8 +109,10 @@ def main() -> int:
     try:
         os.environ["TZ"] = "Europe/Bucharest"
 
-        if not Path("/root/.unraid-api.json").exists() and Path("/root/.hermes/unraid-api.json").exists():
-            Path("/root/.unraid-api.json").symlink_to("/root/.hermes/unraid-api.json")
+        legacy_unraid = HOME_DIR / ".unraid-api.json"
+        hermes_unraid = HERMES_HOME / "unraid-api.json"
+        if not legacy_unraid.exists() and hermes_unraid.exists():
+            legacy_unraid.symlink_to(hermes_unraid)
 
         google_ready = ensure_google_deps()
 

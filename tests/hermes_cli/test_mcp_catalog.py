@@ -736,6 +736,30 @@ class TestGitInstallShaRef:
         branch_attempts = [c for c in calls if "--branch" in c]
         assert len(branch_attempts) == 1, calls
 
+    def test_run_bootstrap_uses_explicit_shell_argv(self, monkeypatch, tmp_path):
+        from hermes_cli import mcp_catalog
+
+        calls = {}
+
+        class _FakeProc:
+            returncode = 0
+
+        monkeypatch.setattr(mcp_catalog, "explicit_shell_argv", lambda cmd: ["/bin/bash", "-lc", cmd])
+
+        def fake_run(argv, *args, **kwargs):
+            calls["argv"] = argv
+            calls["kwargs"] = kwargs
+            return _FakeProc()
+
+        monkeypatch.setattr(mcp_catalog.subprocess, "run", fake_run)
+
+        mcp_catalog._run_bootstrap(tmp_path, ["npm install && npm test"])
+
+        assert calls["argv"] == ["/bin/bash", "-lc", "npm install && npm test"]
+        assert calls["kwargs"]["cwd"] == str(tmp_path)
+        assert calls["kwargs"]["stdin"] is mcp_catalog.subprocess.DEVNULL
+        assert "shell" not in calls["kwargs"]
+
 
 # ---------------------------------------------------------------------------
 # Existing tools_config converged to tools.include

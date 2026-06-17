@@ -8068,6 +8068,13 @@ def _resolve_name(name: str) -> str:
         return name
 
 
+def _shell_exec_argv(cmd: str) -> list[str]:
+    """Return an explicit shell argv for ``shell.exec``."""
+    from hermes_cli._subprocess_compat import explicit_shell_argv
+
+    return explicit_shell_argv(cmd)
+
+
 @method("command.dispatch")
 def _(rid, params: dict) -> dict:
     name, arg = params.get("name", "").lstrip("/"), params.get("arg", "")
@@ -8081,8 +8088,7 @@ def _(rid, params: dict) -> dict:
         qc = qcmds[name]
         if qc.get("type") == "exec":
             r = subprocess.run(
-                qc.get("command", ""),
-                shell=True,
+                _shell_exec_argv(qc.get("command", "")),
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -10305,7 +10311,11 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5001, "shell.exec unavailable: approval safety module not importable")
     try:
         r = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=30, cwd=os.getcwd(),
+            _shell_exec_argv(cmd),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=os.getcwd(),
             stdin=subprocess.DEVNULL,
         )
         return _ok(

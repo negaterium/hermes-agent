@@ -1578,3 +1578,32 @@ class TestShellSafety:
         monkeypatch.delenv(LOCAL_STT_COMMAND_ENV, raising=False)
         use_shell = bool(os.getenv(LOCAL_STT_COMMAND_ENV, "").strip())
         assert use_shell is False
+
+    def test_transcribe_local_command_env_template_uses_explicit_shell_argv(self, monkeypatch):
+        calls = {}
+
+        from tools import transcription_tools as tt
+        from tools.transcription_tools import LOCAL_STT_COMMAND_ENV
+
+        monkeypatch.setenv(LOCAL_STT_COMMAND_ENV, "echo hi | tee {output_dir}/trace.txt")
+        monkeypatch.setattr(tt, "_get_local_command_template", lambda: "echo hi | tee {output_dir}/trace.txt")
+        monkeypatch.setattr(tt, "_prepare_local_audio", lambda file_path, output_dir: ("/tmp/input.wav", None))
+        monkeypatch.setattr(tt, "_load_stt_config", lambda: {})
+        monkeypatch.setattr(tt, "_normalize_local_command_model", lambda name: "base")
+        monkeypatch.setattr(tt, "explicit_shell_argv", lambda cmd: ["/bin/bash", "-lc", cmd])
+
+        def fake_run(argv, *args, **kwargs):
+            calls["argv"] = argv
+            calls["kwargs"] = kwargs
+            raise subprocess.CalledProcessError(1, argv, stderr="boom")
+
+        monkeypatch.setattr(tt.subprocess, "run", fake_run)
+
+        result = tt._transcribe_local_command("/tmp/audio.ogg", "base")
+
+        assert result["success"] is False
+        assert "Local STT failed: boom" == result["error"]
+        assert calls["argv"][0:2] == ["/bin/bash", "-lc"]
+        assert "tee" in calls["argv"][2]
+        assert "shell" not in calls["kwargs"]
+
