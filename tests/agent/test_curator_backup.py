@@ -259,6 +259,32 @@ def test_rollback_rejects_unsafe_tarball(backup_env, monkeypatch):
     assert "unsafe" in msg.lower() or "refus" in msg.lower() or "extract" in msg.lower()
 
 
+def test_rollback_manual_extract_fallback_restores_skills(backup_env, monkeypatch):
+    """If tarfile.extractall(filter=...) is unavailable, rollback should still
+    restore via the manual safe extraction path instead of bare extractall()."""
+    cb = backup_env["cb"]
+    skills = backup_env["skills"]
+    user_skill = _write_skill(skills, "fallback-check", body="survives")
+    snap = cb.snapshot_skills(reason="pre-fallback")
+    assert snap is not None
+
+    import shutil as _sh
+    _sh.rmtree(user_skill)
+    assert not user_skill.exists()
+
+    def raising_filter_extractall(self, path=".", members=None, *, numeric_owner=False, filter=None):
+        if filter is not None:
+            raise TypeError("filter unsupported")
+        raise AssertionError("rollback should not fall back to bare extractall()")
+
+    monkeypatch.setattr(tarfile.TarFile, "extractall", raising_filter_extractall)
+
+    ok, msg, _ = cb.rollback(backup_id=snap.name)
+    assert ok, msg
+    assert user_skill.exists()
+    assert "survives" in (user_skill / "SKILL.md").read_text(encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Integration with run_curator_review
 # ---------------------------------------------------------------------------

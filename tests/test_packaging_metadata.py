@@ -362,6 +362,11 @@ def test_darkserver_repo_keeps_obsidian_sync_python_script_and_installs_it_on_st
     assert '"path1 and path2 are out of sync"' in repo_script
     assert "refusing automatic --resync to protect vault state" in repo_script
     assert 'cmd = ["rclone", "bisync", REMOTE, LOCAL, common, "--resync"]' not in repo_script
+    assert 'HOME_DIR = Path.home()' in repo_script
+    assert 'HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(HOME_DIR / ".hermes")))' in repo_script
+    assert 'LOCAL = os.environ.get("VAULT", os.environ.get("OBSIDIAN_VAULT", str(HOME_DIR / "obsidian-vault")))' in repo_script
+    assert 'CONFIG = os.environ.get("RCLONE_CONF", str(HERMES_HOME / "rclone-writable.conf"))' in repo_script
+    assert 'CACHE_DIR = os.environ.get("RCLONE_CACHE_DIR", str(HERMES_HOME / "cache" / "rclone"))' in repo_script
     assert 'HERMES_HOME_DIR="${HERMES_HOME:-$HOME_DIR/.hermes}"' in startup
     assert 'OBS_SYNC_SCRIPT_DST="${OBS_SYNC_SCRIPT_DST:-$HERMES_HOME_DIR/scripts/obsidian_sync.py}"' in startup
     assert "install -m 0755" in startup

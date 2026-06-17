@@ -5,16 +5,19 @@ import json
 import shutil
 import subprocess
 import sys
+import os
 import tarfile
 from pathlib import Path
 
-REMOTE = "onedrive:Documents/Obsidian Vault/"
-LOCAL = "/root/obsidian-vault/"
-CONFIG = "/root/.hermes/rclone-writable.conf"
-CACHE_DIR = "/root/.hermes/cache/rclone"
-WORKDIR = f"{CACHE_DIR}/bisync"
-LOG = "/root/.hermes/logs/obsidian-sync.log"
-BACKUP_DIR = "/root/.hermes/backups/obsidian-sync"
+REMOTE = os.environ.get("REMOTE", "onedrive:Documents/Obsidian Vault/")
+HOME_DIR = Path.home()
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(HOME_DIR / ".hermes")))
+LOCAL = os.environ.get("VAULT", os.environ.get("OBSIDIAN_VAULT", str(HOME_DIR / "obsidian-vault")))
+CONFIG = os.environ.get("RCLONE_CONF", str(HERMES_HOME / "rclone-writable.conf"))
+CACHE_DIR = os.environ.get("RCLONE_CACHE_DIR", str(HERMES_HOME / "cache" / "rclone"))
+WORKDIR = os.environ.get("RCLONE_WORKDIR", f"{CACHE_DIR}/bisync")
+LOG = os.environ.get("LOG_FILE", str(HERMES_HOME / "logs" / "obsidian-sync.log"))
+BACKUP_DIR = os.environ.get("BACKUP_DIR", str(HERMES_HOME / "backups" / "obsidian-sync"))
 
 HERMES_PUSH_SUBTREES = [
     "AI/Memory",

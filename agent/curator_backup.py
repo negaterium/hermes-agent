@@ -83,6 +83,46 @@ def _cron_jobs_file() -> Path:
 CRON_JOBS_FILENAME = "cron-jobs.json"
 
 
+def _safe_extract_snapshot_member(destination: Path, member: tarfile.TarInfo, tf: tarfile.TarFile) -> None:
+    name = member.name
+    if name.startswith("/") or ".." in Path(name).parts:
+        raise tarfile.TarError(f"refusing to extract unsafe path: {name!r}")
+
+    target = destination / name
+    try:
+        target.relative_to(destination)
+    except ValueError as exc:
+        raise tarfile.TarError(f"refusing to extract unsafe path: {name!r}") from exc
+
+    if member.isdir():
+        target.mkdir(parents=True, exist_ok=True)
+        return
+
+    if not member.isfile():
+        raise tarfile.TarError(f"unsupported archive member type: {name!r}")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    extracted = tf.extractfile(member)
+    if extracted is None:
+        raise tarfile.TarError(f"cannot read archive member: {name!r}")
+
+    with extracted, open(target, "wb") as dst:
+        shutil.copyfileobj(extracted, dst)
+
+
+def _extract_snapshot_tar_safely(destination: Path, tf: tarfile.TarFile) -> None:
+    members = tf.getmembers()
+    for member in members:
+        name = member.name
+        if name.startswith("/") or ".." in Path(name).parts:
+            raise tarfile.TarError(f"refusing to extract unsafe path: {name!r}")
+    try:
+        tf.extractall(str(destination), filter="data")  # type: ignore[call-arg]
+    except TypeError:
+        for member in members:
+            _safe_extract_snapshot_member(destination, member, tf)
+
+
 def _backup_cron_jobs_into(dest: Path) -> Dict[str, Any]:
     """Copy the live cron jobs.json into ``dest`` as ``cron-jobs.json``.
 
@@ -602,20 +642,7 @@ def rollback(backup_id: Optional[str] = None) -> Tuple[bool, str, Optional[Path]
     # Step 4: extract the snapshot into skills/
     try:
         with tarfile.open(archive, "r:gz") as tf:
-            # Python 3.12+ supports filter='data' for safer extraction.
-            # Fall back to the unfiltered call for older interpreters but
-            # still reject absolute paths and .. components defensively.
-            for member in tf.getmembers():
-                name = member.name
-                if name.startswith("/") or ".." in Path(name).parts:
-                    raise tarfile.TarError(
-                        f"refusing to extract unsafe path: {name!r}"
-                    )
-            try:
-                tf.extractall(str(skills), filter="data")  # type: ignore[call-arg]
-            except TypeError:
-                # Python < 3.12 — no filter kwarg
-                tf.extractall(str(skills))
+            _extract_snapshot_tar_safely(skills, tf)
     except (OSError, tarfile.TarError) as e:
         # Best-effort recover: move staged contents back
         for orig, dest in moved:
