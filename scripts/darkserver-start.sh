@@ -11,6 +11,15 @@ OBS_SYNC_SCRIPT_DST="/root/.hermes/scripts/obsidian_sync.py"
 
 mkdir -p "$QMD_LOG_DIR" "$QMD_DATA_DIR" "$(dirname "$OBS_SYNC_SCRIPT_DST")"
 
+if [ -f /root/.hermes/.env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . /root/.hermes/.env
+  set +a
+else
+  echo "[darkserver-start] WARNING: /root/.hermes/.env not found; gateway will start without Hermes secrets" >&2
+fi
+
 if [ -f "$OBS_SYNC_SCRIPT_SRC" ]; then
   install -m 0755 "$OBS_SYNC_SCRIPT_SRC" "$OBS_SYNC_SCRIPT_DST"
 else

@@ -323,6 +323,8 @@ def test_darkserver_dockerfile_restores_qmd_runtime_and_uses_bootstrap_script():
 def test_darkserver_start_script_bootstraps_qmd_collection_and_embed():
     script = (REPO_ROOT / "scripts" / "darkserver-start.sh").read_text(encoding="utf-8")
 
+    assert 'if [ -f /root/.hermes/.env ]; then' in script
+    assert '. /root/.hermes/.env' in script
     assert "command -v qmd" in script
     assert "qmd collection list" in script
     assert "qmd collection add" in script
