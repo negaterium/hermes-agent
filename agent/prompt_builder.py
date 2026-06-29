@@ -280,7 +280,7 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
 
 # Model name substrings that trigger tool-use enforcement guidance.
 # Add new patterns here when a model family needs explicit steering.
-TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm")
+TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek")
 
 # Universal "finish the job" guidance — applied to ALL models, not gated
 # by model family.  Addresses two cross-model failure modes:
@@ -755,10 +755,11 @@ DEVELOPER_ROLE_MODELS = ("gpt-5", "codex")
 
 PLATFORM_HINTS = {
     "whatsapp": (
-        "You are on WhatsApp. Do not use markdown. To send a file, include "
-        "MEDIA:/absolute/path/to/file in your response. Images appear as photos, "
-        "videos play inline, other files arrive as documents, and ![alt](url) "
-        "image links are sent as photos."
+        "You are on WhatsApp. Standard markdown is auto-converted to WhatsApp formatting, "
+        "so you may write in markdown. Tables are not supported; prefer bullet lists or "
+        "labeled key:value pairs. To send a file, include MEDIA:/absolute/path/to/file in "
+        "your response. Images appear as photos, videos play inline, other files arrive as "
+        "documents, and ![alt](url) image links are sent as photos."
     ),
     "whatsapp_cloud": (
         "You are on WhatsApp (via Meta's official Business Cloud API). Standard markdown "
@@ -807,10 +808,11 @@ PLATFORM_HINTS = {
         "and ![alt](url) image links upload as attachments."
     ),
     "signal": (
-        "You are on Signal. Do not use markdown. To send a file, include "
-        "MEDIA:/absolute/path/to/file in your response. Images appear as photos, "
-        "audio as attachments, other files as documents, and ![alt](url) image "
-        "links are sent as photos."
+        "You are on Signal. Standard markdown is auto-converted to Signal formatting, so you "
+        "may write in markdown. Tables are not supported; prefer bullet lists or labeled "
+        "key:value pairs. To send a file, include MEDIA:/absolute/path/to/file in your "
+        "response. Images appear as photos, audio as attachments, other files as documents, "
+        "and ![alt](url) image links are sent as photos."
     ),
     "email": (
         "You are communicating by email. Use plain text, keep replies concise but complete, "
