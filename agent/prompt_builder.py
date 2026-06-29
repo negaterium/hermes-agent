@@ -325,7 +325,7 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
 
 # Model name substrings that trigger tool-use enforcement guidance.
 # Add new patterns here when a model family needs explicit steering.
-TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm")
+TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek")
 
 # Universal "finish the job" guidance — applied to ALL models, not gated
 # by model family.  Addresses two cross-model failure modes:
@@ -679,7 +679,7 @@ PLATFORM_HINTS = {
         "feel free to write in markdown, and use bullet lists ('- item') "
         "freely. Tables are NOT supported — prefer bullet lists or labeled "
         "key:value pairs. "
-        "You can send media files natively: to deliver a file to the user, "
+        "You can send media files natively: to deliver a file, "
         "include MEDIA:/absolute/path/to/file in your response. The file "
         "will be sent as a native WhatsApp attachment — images (.jpg, .png, "
         ".webp) appear as photos, videos (.mp4, .mov) play inline, and other "
@@ -736,7 +736,7 @@ PLATFORM_HINTS = {
         "rich formatting — feel free to write in markdown, and use bullet "
         "lists ('- item') freely (they render as • bullets). Tables are NOT "
         "supported — prefer bullet lists or labeled key:value pairs. "
-        "You can send media files natively: to deliver a file to the user, "
+        "You can send media files natively: to deliver a file, "
         "include MEDIA:/absolute/path/to/file in your response. Images "
         "(.png, .jpg, .webp) appear as photos, audio as attachments, and other "
         "files arrive as downloadable documents. You can also include image "
