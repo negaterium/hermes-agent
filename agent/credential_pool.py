@@ -2121,6 +2121,15 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> Tuple[bool
     if not pconfig or pconfig.auth_type != AUTH_TYPE_API_KEY:
         return changed, active_sources
 
+    if provider == "copilot":
+        # Copilot env vars are validated and normalized by
+        # hermes_cli.copilot_auth.resolve_copilot_token() in
+        # _seed_from_singletons(). Re-seeding them generically here bypasses
+        # that validation and can materialize classic PATs (ghp_*) in the
+        # pool even though the runtime explicitly rejects them for Copilot.
+        # It also creates a second credential-ingest path for the same source.
+        return changed, active_sources
+
     env_url = ""
     if pconfig.base_url_env_var:
         env_url = _get_env_prefer_dotenv(pconfig.base_url_env_var).rstrip("/")
@@ -2302,7 +2311,7 @@ def load_pool(provider: str) -> CredentialPool:
         changed |= _prune_stale_seeded_entries(
             entries,
             singleton_sources | env_sources,
-            prune_env_sources=False,
+            prune_env_sources=(provider == "copilot"),
         )
         changed |= _normalize_pool_priorities(provider, entries)
 
