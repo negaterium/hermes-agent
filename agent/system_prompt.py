@@ -227,8 +227,12 @@ def build_system_prompt_parts(
     # Kanban worker/orchestrator lifecycle — only present when the
     # dispatcher spawned this process (kanban_show check_fn gates on
     # HERMES_KANBAN_TASK env var). Normal chat sessions never see
-    # this block.
-    if "kanban_show" in agent.valid_tool_names:
+    # this block. Resolved once at __init__ (see _kanban_worker_guidance).
+    _kanban_guidance = getattr(agent, "_kanban_worker_guidance", None)
+    if _kanban_guidance:
+        tool_guidance.append(_kanban_guidance)
+    elif _kanban_guidance is None and "kanban_show" in agent.valid_tool_names:
+        # Fallback for code paths that bypass agent_init (rare).
         tool_guidance.append(KANBAN_GUIDANCE)
     if tool_guidance:
         stable_parts.append(" ".join(tool_guidance))
@@ -298,10 +302,24 @@ def build_system_prompt_parts(
             )
             if toolset
         }
+        # Focus mode (opt-in) demotes non-coding skill categories to
+        # names-only in the index (never hidden — skill_view/skills_list
+        # reach everything, and every name stays visible for recall). The
+        # default coding posture leaves the index untouched.
+        _compact_cats = frozenset()
+        try:
+            from agent.coding_context import coding_compact_skill_categories
+
+            _compact_cats = coding_compact_skill_categories(
+                platform=agent.platform, cwd=resolve_context_cwd()
+            )
+        except Exception:
+            _compact_cats = frozenset()
         skills_prompt = _r.build_skills_system_prompt(
             available_tools=agent.valid_tool_names,
             available_toolsets=avail_toolsets,
             query=skill_query,
+            compact_categories=_compact_cats or None,
         )
     else:
         skills_prompt = ""
@@ -330,34 +348,27 @@ def build_system_prompt_parts(
         stable_parts.append(_env_hints)
 
     # Coding posture (base Hermes, any interactive coding surface in a code
-    # workspace — see agent/coding_context.py). Keep the operating brief in
-    # the cross-session-stable prefix, while placing the live git/workspace
-    # snapshot behind its own cache boundary. The post-snapshot blocks must
-    # stay in their historical position after the workspace snapshot.
+    # workspace — see agent/coding_context.py). The operating brief + the live
+    # git/workspace snapshot are built once here and cached for the session;
+    # the snapshot is never re-probed per turn (that would break the prompt
+    # cache), so the brief tells the model to re-check git before relying on it.
     coding_workspace_parts: List[str] = []
     coding_trailing_parts: List[str] = []
     if agent.valid_tool_names:
         try:
-            from agent.coding_context import coding_system_prompt_parts
+            from agent.coding_context import coding_system_blocks
 
-            coding_prefix_parts, coding_workspace_parts, coding_trailing_parts = coding_system_prompt_parts(
-                platform=agent.platform,
-                cwd=resolve_context_cwd(),
-                model=agent.model,
+            stable_parts.extend(
+                coding_system_blocks(
+                    platform=agent.platform,
+                    cwd=resolve_context_cwd(),
+                    model=agent.model,
+                )
             )
-            stable_parts.extend(coding_prefix_parts)
         except Exception:
             # Coding-context probing must never block prompt build.
             pass
-
-    # Guidance assembled after the coding posture historically followed the
-    # workspace snapshot. With no snapshot, the coding tail instead remains
-    # directly after the coding prefix in the cacheable prefix.
-    if coding_workspace_parts:
-        post_workspace_parts: List[str] = []
-    else:
-        stable_parts.extend(coding_trailing_parts)
-        post_workspace_parts = stable_parts
+    post_workspace_parts: List[str] = stable_parts
 
     # Local Python toolchain probe — names python/pip/uv/PEP-668 state when
     # something is non-default so the model can pick the right install
