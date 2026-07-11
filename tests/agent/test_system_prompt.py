@@ -191,38 +191,39 @@ class TestTelegramRichMessagesHint:
     def test_base_hint_without_rich_messages(self, monkeypatch):
         """When rich_messages is False (default), only the base hint is used."""
         agent = _make_agent(platform="telegram")
-        # Mock config to return rich_messages: false (default)
         with patch("hermes_cli.config.load_config_readonly") as mock_cfg:
-            mock_cfg.return_value = {
-                "platforms": {"telegram": {"extra": {"rich_messages": False}}}
-            }
+            mock_cfg.return_value = {"platforms": {"telegram": {"extra": {"rich_messages": False}}}}
             stable = _stable_prompt(agent)
-        # Base hint should be present
         assert "Standard Markdown is automatically converted" in stable
-        # Rich-messages extension should NOT be present
         assert "lean into it" not in stable
         assert "task lists" not in stable
 
     def test_rich_hint_with_rich_messages_enabled(self, monkeypatch):
-        """When rich_messages is True, the rich-messages extension is appended."""
         agent = _make_agent(platform="telegram")
         with patch("hermes_cli.config.load_config_readonly") as mock_cfg:
-            mock_cfg.return_value = {
-                "platforms": {"telegram": {"extra": {"rich_messages": True}}}
-            }
+            mock_cfg.return_value = {"platforms": {"telegram": {"extra": {"rich_messages": True}}}}
             stable = _stable_prompt(agent)
-        # Base hint should be present
         assert "Standard Markdown is automatically converted" in stable
-        # Rich-messages extension should be present
         assert "lean into it" in stable
         assert "task lists" in stable
         assert "math/formulas" in stable
 
     def test_base_hint_without_config(self, monkeypatch):
-        """When config has no telegram section, only base hint is used."""
         agent = _make_agent(platform="telegram")
         with patch("hermes_cli.config.load_config_readonly") as mock_cfg:
             mock_cfg.return_value = {}
             stable = _stable_prompt(agent)
         assert "Standard Markdown is automatically converted" in stable
         assert "lean into it" not in stable
+
+
+class TestToolAwarePlatformHints:
+    def test_gateway_without_media_tools_omits_media_delivery_guidance(self):
+        stable = _stable_prompt(
+            _make_agent(platform="telegram", valid_tool_names=["read_file"])
+        )
+        assert "MEDIA:" not in stable
+
+    def test_cli_and_tui_keep_local_only_cron_guidance(self):
+        for platform in ("cli", "tui"):
+            assert "LOCAL-ONLY" in _stable_prompt(_make_agent(platform=platform))

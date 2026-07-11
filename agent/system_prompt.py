@@ -426,7 +426,7 @@ def build_system_prompt_parts(
     # any per-platform override from config (platform_hints.<platform>).
     _default_hint = ""
     if platform_key in PLATFORM_HINTS:
-        _default_hint = PLATFORM_HINTS[platform_key]
+        _default_hint = _r.build_platform_hint(platform_key, agent.valid_tool_names)
     elif platform_key:
         # Check plugin registry for platform-specific LLM guidance
         try:
