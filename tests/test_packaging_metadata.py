@@ -579,4 +579,3 @@ def test_darkserver_shell_helper_delegates_to_python_safe_sync_helper():
     assert 'ACTION="${1:-safe-sync}"' in shell_script
     assert "exec /usr/bin/env python3" in shell_script
     assert "safe-sync|sync|auto|pull|push-ai|push|bisync" in shell_script
-
