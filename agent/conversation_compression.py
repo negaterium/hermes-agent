@@ -465,6 +465,24 @@ def compress_context(
         prompt — the session is NOT rotated.  Callers should detect the
         no-op via ``len(returned) == len(input)`` and stop the retry loop.
     """
+    skill_query: Optional[str] = (
+        focus_topic.strip()
+        if isinstance(focus_topic, str) and focus_topic.strip()
+        else None
+    )
+    if skill_query is None:
+        skill_query = next(
+            (
+                message.get("content")
+                for message in reversed(messages)
+                if isinstance(message, dict)
+                and message.get("role") == "user"
+                and isinstance(message.get("content"), str)
+                and message.get("content").strip()
+            ),
+            None,
+        )
+
     # Codex app-server sessions: the codex agent owns the real thread context;
     # Hermes' summarizer would only rewrite a local mirror without shrinking
     # the actual thread (#36801). Route compaction to the app server's own
@@ -478,6 +496,7 @@ def compress_context(
             approx_tokens=approx_tokens,
             task_id=task_id,
             force=force,
+            skill_query=skill_query,
         )
 
     # Lazy feasibility check — run the auxiliary-provider probe + context
@@ -607,7 +626,7 @@ def compress_context(
                     pass
             _existing_sp = getattr(agent, "_cached_system_prompt", None)
             if not _existing_sp:
-                _existing_sp = agent._build_system_prompt(system_message)
+                _existing_sp = agent._build_system_prompt(system_message, skill_query=skill_query)
             return messages, _existing_sp
         if _lock_holder is not None:
             _lock_refresher = _CompressionLockLeaseRefresher(
@@ -668,7 +687,7 @@ def compress_context(
                 )
             _existing_sp = getattr(agent, "_cached_system_prompt", None)
             if not _existing_sp:
-                _existing_sp = agent._build_system_prompt(system_message)
+                _existing_sp = agent._build_system_prompt(system_message, skill_query=skill_query)
             return messages, _existing_sp
         finally:
             _release_lock()
@@ -683,7 +702,7 @@ def compress_context(
         )
         _existing_sp = getattr(agent, "_cached_system_prompt", None)
         if not _existing_sp:
-            _existing_sp = agent._build_system_prompt(system_message)
+            _existing_sp = agent._build_system_prompt(system_message, skill_query=skill_query)
         _release_lock()
         return messages, _existing_sp
 
@@ -720,7 +739,7 @@ def compress_context(
         _ensure_compressed_has_user_turn(messages, compressed)
 
         agent._invalidate_system_prompt()
-        new_system_prompt = agent._build_system_prompt(system_message)
+        new_system_prompt = agent._build_system_prompt(system_message, skill_query=skill_query)
         agent._cached_system_prompt = new_system_prompt
 
         if agent._session_db:
@@ -1014,6 +1033,7 @@ def _compress_context_via_codex_app_server(
     approx_tokens: Optional[int] = None,
     task_id: str = "default",
     force: bool = False,
+    skill_query: Optional[str] = None,
 ) -> Tuple[list, str]:
     """Route compaction to Codex app-server for Codex-owned threads.
 
@@ -1038,7 +1058,7 @@ def _compress_context_via_codex_app_server(
         )
         existing_prompt = getattr(agent, "_cached_system_prompt", None)
         if not existing_prompt:
-            existing_prompt = agent._build_system_prompt(system_message)
+            existing_prompt = agent._build_system_prompt(system_message, skill_query=skill_query)
         return messages, existing_prompt
 
     codex_session = getattr(agent, "_codex_session", None)
@@ -1052,7 +1072,7 @@ def _compress_context_via_codex_app_server(
         )
         existing_prompt = getattr(agent, "_cached_system_prompt", None)
         if not existing_prompt:
-            existing_prompt = agent._build_system_prompt(system_message)
+            existing_prompt = agent._build_system_prompt(system_message, skill_query=skill_query)
         return messages, existing_prompt
 
     logger.info(
@@ -1083,7 +1103,7 @@ def _compress_context_via_codex_app_server(
             pass
         existing_prompt = getattr(agent, "_cached_system_prompt", None)
         if not existing_prompt:
-            existing_prompt = agent._build_system_prompt(system_message)
+            existing_prompt = agent._build_system_prompt(system_message, skill_query=skill_query)
         return messages, existing_prompt
 
     try:
@@ -1122,7 +1142,7 @@ def _compress_context_via_codex_app_server(
     )
     existing_prompt = getattr(agent, "_cached_system_prompt", None)
     if not existing_prompt:
-        existing_prompt = agent._build_system_prompt(system_message)
+        existing_prompt = agent._build_system_prompt(system_message, skill_query=skill_query)
     return messages, existing_prompt
 
 
