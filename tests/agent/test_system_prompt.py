@@ -99,3 +99,15 @@ class TestCodingContextBlock:
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
         agent = _make_agent(valid_tool_names=[], platform="cli")
         assert "coding agent" not in _stable_prompt(agent)
+
+
+class TestToolAwarePlatformHints:
+    def test_gateway_without_media_tools_omits_media_delivery_guidance(self):
+        stable = _stable_prompt(
+            _make_agent(platform="telegram", valid_tool_names=["read_file"])
+        )
+        assert "MEDIA:" not in stable
+
+    def test_cli_and_tui_keep_local_only_cron_guidance(self):
+        for platform in ("cli", "tui"):
+            assert "LOCAL-ONLY" in _stable_prompt(_make_agent(platform=platform))
