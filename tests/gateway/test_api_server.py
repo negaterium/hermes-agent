@@ -286,6 +286,8 @@ class TestIdempotencyCache:
 
 class TestAdapterInit:
     def test_default_config(self):
+        for key in ("API_SERVER_HOST", "API_SERVER_PORT", "API_SERVER_KEY", "API_SERVER_CORS_ORIGINS"):
+            os.environ.pop(key, None)
         config = PlatformConfig(enabled=True)
         adapter = APIServerAdapter(config)
         assert adapter._host == "127.0.0.1"

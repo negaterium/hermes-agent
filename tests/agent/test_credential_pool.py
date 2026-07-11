@@ -2312,6 +2312,63 @@ def test_load_pool_does_not_seed_copilot_when_no_token(tmp_path, monkeypatch):
     assert pool.entries() == []
 
 
+def test_load_pool_does_not_seed_invalid_copilot_classic_pat_from_env(tmp_path, monkeypatch):
+    """Classic ghp_* tokens in shared GitHub env vars must not appear in the Copilot pool.
+
+    ``load_pool(\"copilot\")`` has a dedicated singleton path that validates env
+    tokens through ``resolve_copilot_token()``. A generic API-key env seeding
+    fallback used to bypass that validation and materialize ``env:GITHUB_TOKEN``
+    entries even though Copilot rejects classic PATs at runtime.
+    """
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    _write_auth_store(tmp_path, {"version": 1, "credential_pool": {}})
+    (hermes_home / ".env").write_text("GITHUB_TOKEN=ghp_cl...\n")
+
+    from agent.credential_pool import load_pool
+    pool = load_pool("copilot")
+
+    assert not pool.has_credentials()
+    assert pool.entries() == []
+
+
+def test_load_pool_prunes_stale_legacy_copilot_env_entry(tmp_path, monkeypatch):
+    """Legacy persisted env:* Copilot entries should disappear once invalidated.
+
+    Older builds could persist ``env:GITHUB_TOKEN`` references in the Copilot
+    pool. After the validation fix, reloading the pool should prune that stale
+    row instead of continuing to show a broken Copilot credential forever.
+    """
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "copilot": [
+                    {
+                        "source": "env:GITHUB_TOKEN",
+                        "auth_type": "api_key",
+                        "base_url": "https://api.githubcopilot.com",
+                        "label": "GITHUB_TOKEN",
+                        "secret_fingerprint": "sha256:deadbeefdeadbeef",
+                    }
+                ]
+            },
+        },
+    )
+    (hermes_home / ".env").write_text("GITHUB_TOKEN=ghp_cl...\n")
+
+    from agent.credential_pool import load_pool
+    pool = load_pool("copilot")
+
+    assert not pool.has_credentials()
+    assert pool.entries() == []
+
+
 def test_load_pool_seeds_qwen_oauth_via_cli_tokens(tmp_path, monkeypatch):
     """Qwen OAuth credentials from ~/.qwen/oauth_creds.json should be seeded into the pool."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))

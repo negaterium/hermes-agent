@@ -142,7 +142,11 @@ def _tui_embedded_pane_clarifier(hint: str) -> str:
     return hint + _TUI_EMBEDDED_PANE_CLARIFIER
 
 
-def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) -> Dict[str, str]:
+def build_system_prompt_parts(
+    agent: Any,
+    system_message: Optional[str] = None,
+    skill_query: Optional[str] = None,
+) -> Dict[str, str]:
     """Assemble the system prompt as three ordered parts.
 
     Returns a dict with three keys:
@@ -194,7 +198,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         stable_parts.append(DEFAULT_AGENT_IDENTITY)
 
     # Pointer to the hermes-agent skill + docs for user questions about Hermes itself.
-    stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
+    if "skill_view" in agent.valid_tool_names:
+        stable_parts.append(HERMES_AGENT_HELP_GUIDANCE)
 
     # Universal task-completion / no-fabrication guidance.  Applied to ALL
     # models regardless of tool_use_enforcement gating — the failure modes
@@ -280,14 +285,18 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             # Google model operational guidance (conciseness, absolute
             # paths, parallel tool calls, verify-before-edit, etc.)
             if "gemini" in _model_lower or "gemma" in _model_lower:
-                stable_parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
+                stable_parts.append(
+                    _r.build_google_model_operational_guidance(agent.valid_tool_names)
+                )
             # OpenAI GPT/Codex execution discipline (tool persistence,
             # prerequisite checks, verification, anti-hallucination).
             # Also applied to xAI Grok — same failure modes (claims completion
             # without tool calls, suggests workarounds instead of using
             # existing tools, replies with plans instead of executing).
             if "gpt" in _model_lower or "codex" in _model_lower or "grok" in _model_lower:
-                stable_parts.append(OPENAI_MODEL_EXECUTION_GUIDANCE)
+                stable_parts.append(
+                    _r.build_openai_model_execution_guidance(agent.valid_tool_names)
+                )
 
     has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
     if has_skills_tools:
@@ -314,6 +323,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         skills_prompt = _r.build_skills_system_prompt(
             available_tools=agent.valid_tool_names,
             available_toolsets=avail_toolsets,
+            query=skill_query,
             compact_categories=_compact_cats or None,
         )
     else:
@@ -501,7 +511,11 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     }
 
 
-def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str:
+def build_system_prompt(
+    agent: Any,
+    system_message: Optional[str] = None,
+    skill_query: Optional[str] = None,
+) -> str:
     """Assemble the full system prompt from all layers.
 
     Called once per session (cached on ``agent._cached_system_prompt``) and
@@ -516,7 +530,11 @@ def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str
     mid-session, which is the only way to keep upstream prompt caches
     warm across turns.
     """
-    parts = build_system_prompt_parts(agent, system_message=system_message)
+    parts = build_system_prompt_parts(
+        agent,
+        system_message=system_message,
+        skill_query=skill_query,
+    )
     joined = "\n\n".join(p for p in (parts["stable"], parts["context"], parts["volatile"]) if p)
 
     # Surface context-file truncation warnings through the normal agent status
