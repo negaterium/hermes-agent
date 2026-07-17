@@ -147,6 +147,31 @@ class TestGatewayPidState:
         assert status.get_running_pid(pid_path, cleanup_stale=False) == os.getpid()
         assert pid_path.exists()
 
+    def test_get_running_pid_removes_stale_gateway_pid_and_state_files(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        pid_path = tmp_path / "gateway.pid"
+        state_path = tmp_path / "gateway_state.json"
+        pid_path.write_text(json.dumps({
+            "pid": 99999,
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway", "run"],
+            "start_time": 123,
+        }))
+        state_path.write_text(json.dumps({
+            "pid": 99999,
+            "kind": "hermes-gateway",
+            "gateway_state": "running",
+        }))
+
+        def fake_kill(pid, sig):
+            raise ProcessLookupError
+
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+
+        assert status.get_running_pid() is None
+        assert not pid_path.exists()
+        assert not state_path.exists()
+
     def test_runtime_lock_claims_and_releases_liveness(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 

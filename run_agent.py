@@ -152,17 +152,29 @@ from agent.model_metadata import (
     estimate_request_tokens_rough,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.estimate_request_tokens_rough")
     is_local_endpoint,
 )
-from agent.usage_pricing import normalize_usage
+from agent.usage_pricing import estimate_usage_cost, normalize_usage
 # Re-exported for tests that monkeypatch these symbols on run_agent.
 from agent.context_compressor import ContextCompressor  # noqa: F401
+from agent.subdirectory_hints import SubdirectoryHintTracker
+from agent.prompt_caching import apply_anthropic_cache_control
 from agent.retry_utils import jittered_backoff  # noqa: F401
 from agent.prompt_builder import (  # noqa: F401  # re-exported via _ra() / mock.patch("run_agent.<name>") / from run_agent import <name>
     DEFAULT_AGENT_IDENTITY,
+    MEMORY_GUIDANCE,
+    SESSION_SEARCH_GUIDANCE,
+    SKILLS_GUIDANCE,
+    HERMES_AGENT_HELP_GUIDANCE,
+    KANBAN_GUIDANCE,
     build_skills_system_prompt,
     build_context_files_prompt,
     build_environment_hints,
+    build_platform_hint,
     build_nous_subscription_prompt,
     load_soul_md,
+    TOOL_USE_ENFORCEMENT_GUIDANCE,
+    TOOL_USE_ENFORCEMENT_MODELS,
+    build_google_model_operational_guidance,
+    build_openai_model_execution_guidance,
 )
 from agent.process_bootstrap import _get_proxy_from_env  # noqa: F401
 from agent.message_sanitization import (  # noqa: F401
@@ -185,6 +197,8 @@ from agent.codex_responses_adapter import (
     _summarize_user_message_for_log,  # also used by _sync_external_memory_for_turn (memory boundary)
 )
 from agent.tool_guardrails import (
+    ToolCallGuardrailConfig,
+    ToolCallGuardrailController,
     ToolGuardrailDecision,
     append_toolguard_guidance,
     toolguard_synthetic_result,
@@ -3751,15 +3765,46 @@ class AIAgent:
 
 
 
-    def _build_system_prompt_parts(self, system_message: str = None) -> Dict[str, str]:
+    def _maybe_specialize_tool_surface_for_query(self, query: str) -> None:
+        """Compatibility shim that keeps the full configured tool surface live.
+
+        DarkServer previously narrowed first-turn schemas based on the opening
+        query. That made configured tools disappear for the entire session.
+        Keep this entry point for legacy callers while restoring the post-init
+        tool snapshot unconditionally.
+        """
+        self._initial_tool_gating_applied = True
+        self._tool_gating_summary = None
+        full_tools = list(getattr(self, "_full_tools", None) or [])
+        if not full_tools:
+            return
+
+        self.tools = full_tools
+        full_names = set(getattr(self, "_full_valid_tool_names", set()) or set())
+        self.valid_tool_names = full_names or {
+            tool.get("function", {}).get("name")
+            for tool in full_tools
+            if isinstance(tool, dict)
+        }
+        self.valid_tool_names.discard(None)
+
+    def _build_system_prompt_parts(
+        self, system_message: Optional[str] = None, skill_query: Optional[str] = None
+    ) -> Dict[str, str]:
         """Forwarder — see ``agent.system_prompt.build_system_prompt_parts``."""
         from agent.system_prompt import build_system_prompt_parts
-        return build_system_prompt_parts(self, system_message=system_message)
+        return build_system_prompt_parts(
+            self, system_message=system_message, skill_query=skill_query
+        )
 
-    def _build_system_prompt(self, system_message: str = None) -> str:
+    def _build_system_prompt(
+        self, system_message: Optional[str] = None, skill_query: Optional[str] = None
+    ) -> str:
         """Forwarder — see ``agent.system_prompt.build_system_prompt``."""
         from agent.system_prompt import build_system_prompt
-        return build_system_prompt(self, system_message=system_message)
+        return build_system_prompt(
+            self, system_message=system_message, skill_query=skill_query
+        )
 
     @staticmethod
     def _get_tool_call_id_static(tc) -> str:

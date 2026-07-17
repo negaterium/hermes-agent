@@ -57,7 +57,7 @@ class _FakeAgent:
         self.context_compressor = types.SimpleNamespace(
             protect_first_n=2, protect_last_n=2
         )
-        self._cached_system_prompt = "SYSTEM"
+        self._cached_system_prompt: str | None = "SYSTEM"
         self._memory_store = None
         self._memory_manager = None
         self._memory_nudge_interval = 0
@@ -210,6 +210,28 @@ def test_persist_user_message_becomes_original():
     assert ctx.messages[-1]["content"] == "api-prefixed"
 
 
+def test_fresh_prompt_build_uses_original_user_message_as_skill_query():
+    agent = _FakeAgent()
+    agent._cached_system_prompt = None
+
+    def restore(_agent, *_args, **_kwargs):
+        _agent._cached_system_prompt = "SYSTEM"
+
+    restore_prompt = MagicMock(side_effect=restore)
+    _build(
+        agent,
+        user_message="API transport prefix included",
+        persist_user_message="check the latest Hermes update",
+        restore_or_build_system_prompt=restore_prompt,
+    )
+
+    restore_prompt.assert_called_once_with(
+        agent,
+        None,
+        None,
+        skill_query="check the latest Hermes update",
+    )
+
 def test_pending_cli_message_carries_durable_marker_to_new_turn_dict():
     """A close-persisted CLI input must not be written again by turn start."""
     agent = _FakeAgent()
@@ -259,6 +281,7 @@ def test_pending_cli_message_uses_clean_override_for_api_local_note():
     assert agent._pending_cli_user_message is None
 
 
+
 def test_memory_nudge_fires_at_interval():
     agent = _FakeAgent()
     agent._memory_nudge_interval = 1
@@ -288,7 +311,7 @@ def test_ensure_db_session_runs_after_system_prompt_restore():
     agent = _FakeAgent()
     agent._cached_system_prompt = None  # fresh agent, no cached prompt yet
 
-    def _restore(_agent, _system_message, _history):
+    def _restore(_agent, _system_message, _history, *, skill_query=None):
         _agent._cached_system_prompt = "REBUILT-SYSTEM"
 
     _build(agent, restore_or_build_system_prompt=_restore)

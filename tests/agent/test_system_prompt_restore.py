@@ -132,6 +132,21 @@ class TestLegitimateFreshBuild:
         db.update_system_prompt.assert_called_once_with(agent.session_id, "BUILT_PROMPT")
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
+    def test_no_history_passes_first_user_message_as_skill_query(self):
+        agent = _make_agent(session_db=None)
+
+        _restore_or_build_system_prompt(
+            agent,
+            None,
+            [],
+            skill_query="check the latest Hermes update",
+        )
+
+        agent._build_system_prompt.assert_called_once_with(
+            None,
+            skill_query="check the latest Hermes update",
+        )
+
     def test_no_db_skips_persistence(self):
         """When session DB is None, build and skip persistence silently."""
         agent = _make_agent(session_db=None)

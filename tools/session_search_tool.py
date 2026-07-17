@@ -257,6 +257,28 @@ def _read_session(db, session_id: str, head: int = 20, tail: int = 10) -> str:
     return json.dumps(response, ensure_ascii=False)
 
 
+def _format_conversation(messages: List[Dict[str, Any]]) -> str:
+    """Render a raw session transcript excerpt in the classic role-prefixed form."""
+    lines: List[str] = []
+    for m in messages or []:
+        role = str(m.get("role") or "unknown").upper()
+        content = m.get("content")
+        if content is None:
+            content = ""
+        lines.append(f"[{role}]: {content}")
+    return "\n\n".join(lines)
+
+
+def _coerce_limit(limit: Any, default: int = 3, min_value: int = 1, max_value: int = 5) -> int:
+    """Defensively coerce model-provided limit values to a safe bounded int."""
+    if not isinstance(limit, int):
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = default
+    return max(min_value, min(limit, max_value))
+
+
 def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str:
     """Return metadata for the most recent sessions (no LLM calls, no FTS5)."""
     try:
@@ -298,6 +320,58 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str
     except Exception as e:
         logging.error("Error listing recent sessions: %s", e, exc_info=True)
         return tool_error(f"Failed to list recent sessions: {e}", success=False)
+
+
+def session_list(
+    limit: int = 10,
+    db=None,
+    current_session_id: str = None,
+) -> str:
+    """List recent sessions as metadata without LLM summarization."""
+    if db is None:
+        return tool_error("Session database not available.", success=False)
+    limit = _coerce_limit(limit, default=10, min_value=1, max_value=20)
+    return _list_recent_sessions(db, limit, current_session_id)
+
+
+def session_read(
+    session_id: str,
+    max_chars: int = 12000,
+    db=None,
+) -> str:
+    """Return a raw transcript excerpt for a single session."""
+    if db is None:
+        return tool_error("Session database not available.", success=False)
+    if not session_id or not str(session_id).strip():
+        return tool_error("session_id is required.", success=False)
+
+    if not isinstance(max_chars, int):
+        try:
+            max_chars = int(max_chars)
+        except (TypeError, ValueError):
+            max_chars = 12000
+    max_chars = max(200, min(max_chars, 50000))
+
+    session = db.get_session(session_id)
+    if not session:
+        return tool_error(f"Session '{session_id}' not found.", success=False)
+
+    messages = db.get_messages_as_conversation(session_id)
+    transcript = _format_conversation(messages)
+    truncated = False
+    if len(transcript) > max_chars:
+        transcript = transcript[:max_chars] + "\n\n...[transcript truncated]..."
+        truncated = True
+
+    return json.dumps({
+        "success": True,
+        "session_id": session_id,
+        "title": session.get("title") or None,
+        "source": session.get("source", "unknown"),
+        "started_at": session.get("started_at"),
+        "content": transcript,
+        "truncated": truncated,
+    }, ensure_ascii=False)
 
 
 def _scroll(
@@ -752,7 +826,7 @@ def check_session_search_requirements() -> bool:
 SESSION_SEARCH_SCHEMA = {
     "name": "session_search",
     "description": (
-        "Search past sessions stored in the local session DB, or scroll inside one. "
+        "Search past sessions stored in the local session DB across past conversations, or scroll inside one. "
         "FTS5-backed retrieval over the SQLite message store. No LLM calls — every "
         "shape returns actual messages from the DB.\n\n"
         "SOURCE-FIRST LIMIT\n\n"
@@ -897,6 +971,50 @@ SESSION_SEARCH_SCHEMA = {
 }
 
 
+SESSION_LIST_SCHEMA = {
+    "name": "session_list",
+    "description": (
+        "List recent past sessions with titles, previews, and timestamps. "
+        "Use this when the user asks what we worked on recently or you need to browse recall candidates before reading one."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "Maximum sessions to return (default 10, max 20).",
+                "default": 10,
+            },
+        },
+        "required": [],
+    },
+}
+
+
+SESSION_READ_SCHEMA = {
+    "name": "session_read",
+    "description": (
+        "Read a past session transcript excerpt by session_id. "
+        "Use after session_list or session_search when you need the raw conversation details instead of a summary."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "session_id": {
+                "type": "string",
+                "description": "Exact session ID to read.",
+            },
+            "max_chars": {
+                "type": "integer",
+                "description": "Maximum transcript characters to return (default 12000, max 50000).",
+                "default": 12000,
+            },
+        },
+        "required": ["session_id"],
+    },
+}
+
+
 # --- Registry ---
 from tools.registry import registry, tool_error
 
@@ -918,4 +1036,30 @@ registry.register(
     ),
     check_fn=check_session_search_requirements,
     emoji="🔍",
+)
+
+registry.register(
+    name="session_list",
+    toolset="session_search",
+    schema=SESSION_LIST_SCHEMA,
+    handler=lambda args, **kw: session_list(
+        limit=args.get("limit", 10),
+        db=kw.get("db"),
+        current_session_id=kw.get("current_session_id"),
+    ),
+    check_fn=check_session_search_requirements,
+    emoji="🗂️",
+)
+
+registry.register(
+    name="session_read",
+    toolset="session_search",
+    schema=SESSION_READ_SCHEMA,
+    handler=lambda args, **kw: session_read(
+        session_id=args.get("session_id", ""),
+        max_chars=args.get("max_chars", 12000),
+        db=kw.get("db"),
+    ),
+    check_fn=check_session_search_requirements,
+    emoji="📜",
 )
