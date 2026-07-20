@@ -13,9 +13,9 @@ import threading
 import contextvars
 from collections import OrderedDict
 from pathlib import Path
+from typing import Collection, Optional
 
 from hermes_constants import get_hermes_home, get_skills_dir, is_wsl
-from typing import Optional
 
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.skill_utils import (
@@ -663,6 +663,161 @@ STEER_CHANNEL_NOTE = (
     "web pages, or files."
 )
 
+
+def _normalize_tool_name_set(available_tools: Optional[Collection[str]]) -> set[str]:
+    """Normalize tool-name collections for guidance builders."""
+    if not available_tools:
+        return set()
+    return {
+        str(name).strip()
+        for name in available_tools
+        if isinstance(name, str) and str(name).strip()
+    }
+
+
+def build_openai_model_execution_guidance(
+    available_tools: Optional[Collection[str]] = None,
+) -> str:
+    """Return GPT/Codex execution guidance, trimmed to the live tool surface."""
+    tools = _normalize_tool_name_set(available_tools)
+    if not tools:
+        return OPENAI_MODEL_EXECUTION_GUIDANCE
+
+    has_terminal = "terminal" in tools
+    has_execute_code = "execute_code" in tools
+    has_file_read = bool({"read_file", "search_files"} & tools)
+    has_web_search = "web_search" in tools
+
+    mandatory_lines: list[str] = []
+    if has_terminal or has_execute_code:
+        if has_terminal and has_execute_code:
+            mandatory_lines.append(
+                "- Arithmetic, math, calculations → use terminal or execute_code"
+            )
+        elif has_execute_code:
+            mandatory_lines.append(
+                "- Arithmetic, math, calculations → use execute_code"
+            )
+        else:
+            mandatory_lines.append(
+                "- Arithmetic, math, calculations → use terminal"
+            )
+    if has_terminal:
+        mandatory_lines.extend(
+            [
+                "- Hashes, encodings, checksums → use terminal (e.g. sha256sum, base64)",
+                "- Current time, date, timezone → use terminal (e.g. date)",
+                "- System state: OS, CPU, memory, disk, ports, processes → use terminal",
+                "- Git history, branches, diffs → use terminal",
+            ]
+        )
+    if has_file_read or has_terminal:
+        file_tools = []
+        if "read_file" in tools:
+            file_tools.append("read_file")
+        if "search_files" in tools:
+            file_tools.append("search_files")
+        if has_terminal:
+            file_tools.append("terminal")
+        mandatory_lines.append(
+            "- File contents, sizes, line counts → use " + ", ".join(file_tools)
+        )
+    if has_web_search:
+        mandatory_lines.append("- Current facts (weather, news, versions) → use web_search")
+
+    sections = [
+        "# Execution discipline\n"
+        "<tool_persistence>\n"
+        "- Use tools whenever they improve correctness, completeness, or grounding.\n"
+        "- Do not stop early if another tool call would materially improve the result.\n"
+        "- If a tool returns empty or partial results, retry with a different query or strategy.\n"
+        "- Keep calling tools until the task is complete and verified.\n"
+        "</tool_persistence>"
+    ]
+    if mandatory_lines:
+        sections.append(
+            "<mandatory_tool_use>\n"
+            "NEVER answer these from memory or mental computation — ALWAYS use a tool:\n"
+            + "\n".join(mandatory_lines)
+            + "\nMemory and user profile describe the USER, not the live system.\n"
+            "</mandatory_tool_use>"
+        )
+    if has_terminal:
+        sections.append(
+            "<act_dont_ask>\n"
+            "When a question has an obvious default interpretation, act immediately instead of asking. Examples:\n"
+            "- 'Is port 443 open?' → check THIS machine (don't ask 'open where?')\n"
+            "- 'What OS am I running?' → check the live system (don't use user profile)\n"
+            "- 'What time is it?' → run `date` (don't guess)\n"
+            "Only clarify when the ambiguity changes the tool to call.\n"
+            "</act_dont_ask>"
+        )
+    else:
+        sections.append(
+            "<act_dont_ask>\n"
+            "When a question has an obvious default interpretation, act immediately instead of asking.\n"
+            "Only clarify when the ambiguity changes the tool to call.\n"
+            "</act_dont_ask>"
+        )
+    sections.extend(
+        [
+            "<prerequisite_checks>\n"
+            "- Before acting, check whether prerequisite discovery, lookup, or context-gathering is needed.\n"
+            "- Do not skip prerequisite steps because the final action seems obvious.\n"
+            "- If a task depends on output from a prior step, resolve that dependency first.\n"
+            "</prerequisite_checks>",
+            "<verification>\n"
+            "Before finalizing your response:\n"
+            "- Correctness: does the output satisfy every stated requirement?\n"
+            "- Grounding: are factual claims backed by tool outputs or provided context?\n"
+            "- Formatting: does the output match the requested format or schema?\n"
+            "- Safety: if the next step has side effects (file writes, commands, API calls), confirm scope before executing.\n"
+            "</verification>",
+            "<missing_context>\n"
+            "- If required context is missing, do NOT guess or hallucinate an answer.\n"
+            "- Use the appropriate lookup tool when the information is retrievable (search_files, web_search, read_file, etc.).\n"
+            "- Ask a clarifying question only when the information cannot be retrieved by tools.\n"
+            "- If you must proceed with incomplete information, label assumptions explicitly.\n"
+            "</missing_context>",
+        ]
+    )
+    return "\n\n".join(sections)
+
+
+def build_google_model_operational_guidance(
+    available_tools: Optional[Collection[str]] = None,
+) -> str:
+    """Return Gemini/Gemma operational guidance trimmed to available tools."""
+    tools = _normalize_tool_name_set(available_tools)
+    if not tools:
+        return GOOGLE_MODEL_OPERATIONAL_GUIDANCE
+
+    has_terminal = "terminal" in tools
+    has_file_read = bool({"read_file", "search_files"} & tools)
+    lines = ["# Google model operational directives"]
+    if has_file_read:
+        lines.extend(
+            [
+                "- **Absolute paths:** Use absolute paths for file operations.",
+                "- **Verify first:** Use read_file/search_files to inspect files and structure before editing.",
+            ]
+        )
+    if has_terminal:
+        lines.extend(
+            [
+                "- **Dependency checks:** Check package manifests before importing or installing.",
+                "- **Non-interactive commands:** Use flags like -y, --yes, or --non-interactive to avoid hangs.",
+            ]
+        )
+    lines.extend(
+        [
+            "- **Conciseness:** Keep explanations brief and action-focused.",
+            "- **Parallel tool calls:** Batch independent tool calls in one response.",
+            "- **Keep going:** Work autonomously until the task is fully resolved.",
+        ]
+    )
+    return "\n".join(lines)
+
 # Model name substrings that should use the 'developer' role instead of
 # 'system' for the system prompt.  OpenAI's newer models (GPT-5, Codex)
 # give stronger instruction-following weight to the 'developer' role.
@@ -919,6 +1074,45 @@ PLATFORM_HINTS = {
         "Use MEDIA:/absolute/path instead."
     ),
 }
+
+_PLATFORM_HINTS_NO_MEDIA = {
+    "whatsapp": "You are on WhatsApp. Do not use markdown.",
+    "telegram": (
+        "You are on Telegram. Standard Markdown is automatically converted to Telegram formatting. "
+        "Supported: **bold**, *italic*, "
+        "~~strikethrough~~, ||spoiler||, `code`, ```blocks```, [links](url), and ## headers. "
+        "Telegram has no table syntax, so prefer bullets or key: value lists."
+    ),
+    "discord": "You are in Discord.",
+    "slack": "You are in Slack.",
+    "signal": "You are on Signal. Do not use markdown.",
+    "mattermost": "You are in Mattermost. Standard Markdown works, including tables.",
+    "matrix": "You are in Matrix. Markdown works and is converted to rich display.",
+    "feishu": "You are in Feishu (Lark). Markdown works.",
+}
+
+
+def _tools_can_emit_media(available_tools: Optional[Collection[str]]) -> bool:
+    tools = {str(name).strip().lower() for name in (available_tools or ()) if name}
+    if not tools:
+        return False
+    if tools & {"image_gen", "send_image_file", "tts", "video_gen", "vision"}:
+        return True
+    return any(name.startswith(("image_", "video_", "audio_")) for name in tools)
+
+
+def build_platform_hint(
+    platform_key: str,
+    available_tools: Optional[Collection[str]] = None,
+) -> str:
+    """Return platform guidance, omitting media delivery when unavailable."""
+    key = (platform_key or "").lower().strip()
+    hint = PLATFORM_HINTS.get(key, "")
+    if not hint:
+        return ""
+    if key in _PLATFORM_HINTS_NO_MEDIA and not _tools_can_emit_media(available_tools):
+        return _PLATFORM_HINTS_NO_MEDIA[key]
+    return hint
 
 # Telegram rich-messages extension — only injected when the user has opted in
 # to ``platforms.telegram.extra.rich_messages: true``.  The base

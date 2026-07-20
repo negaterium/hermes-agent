@@ -165,6 +165,9 @@ from agent.prompt_builder import (  # noqa: F401  # re-exported via _ra() / mock
     build_skills_system_prompt,
     build_context_files_prompt,
     build_environment_hints,
+    build_google_model_operational_guidance,
+    build_openai_model_execution_guidance,
+    build_platform_hint,
     build_nous_subscription_prompt,
     load_soul_md,
 )
@@ -4122,15 +4125,21 @@ class AIAgent:
 
 
 
-    def _build_system_prompt_parts(self, system_message: str = None) -> Dict[str, str]:
+    def _build_system_prompt_parts(
+        self, system_message: Optional[str] = None, skill_query: Optional[str] = None
+    ) -> Dict[str, str]:
         """Forwarder — see ``agent.system_prompt.build_system_prompt_parts``."""
         from agent.system_prompt import build_system_prompt_parts
-        return build_system_prompt_parts(self, system_message=system_message)
+        return build_system_prompt_parts(
+            self, system_message=system_message, skill_query=skill_query
+        )
 
-    def _build_system_prompt(self, system_message: str = None) -> str:
+    def _build_system_prompt(
+        self, system_message: Optional[str] = None, skill_query: Optional[str] = None
+    ) -> str:
         """Forwarder — see ``agent.system_prompt.build_system_prompt``."""
         from agent.system_prompt import build_system_prompt
-        return build_system_prompt(self, system_message=system_message)
+        return build_system_prompt(self, system_message=system_message, skill_query=skill_query)
 
     # =========================================================================
     # Pre/post-call guardrails (inspired by PR #1321 — @alireza78a)
