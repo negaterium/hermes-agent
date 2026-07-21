@@ -11,6 +11,7 @@ from agent.prompt_builder import (
     _scan_context_content,
     _truncate_content,
     _parse_skill_file,
+    _normalize_skill_query_terms,
     _skill_should_show,
     _find_hermes_md,
     _find_git_root,
@@ -416,6 +417,13 @@ class TestBuildSkillsSystemPrompt:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         result = build_skills_system_prompt()
         assert result == ""
+
+    def test_skill_query_normalization_filters_stopwords(self):
+        assert _normalize_skill_query_terms("help me debug the Hermes gateway") == [
+            "debug",
+            "hermes",
+            "gateway",
+        ]
 
     def test_builds_index_with_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))

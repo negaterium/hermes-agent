@@ -1712,6 +1712,14 @@ def _current_session_platform_hint() -> str:
         return ""
 
 
+_SKILL_QUERY_STOPWORDS = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+        "help", "how", "i", "if", "in", "into", "is", "it", "me", "my",
+        "of", "on", "or", "please", "set", "setup", "that", "the", "this",
+        "to", "up", "use", "using", "want", "with",
+    }
+)
 _DEFAULT_SKILL_CANDIDATE_LIMIT = 8
 
 
