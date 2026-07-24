@@ -612,16 +612,28 @@ def build_turn_context(
 
     # ── System prompt (cached per session for prefix caching) ──
     if agent._cached_system_prompt is None:
-        restore_or_build_system_prompt(
-            agent,
-            system_message,
-            conversation_history,
-            skill_query=(
-                original_user_message
-                if isinstance(original_user_message, str)
-                else None
-            ),
+        _skill_query = (
+            original_user_message
+            if isinstance(original_user_message, str)
+            else None
         )
+        try:
+            restore_or_build_system_prompt(
+                agent,
+                system_message,
+                conversation_history,
+                skill_query=_skill_query,
+            )
+        except TypeError as exc:
+            # Keep compatibility with lightweight/test/custom prompt builders
+            # that still implement the pre-skill-query three-argument contract.
+            if "skill_query" not in str(exc):
+                raise
+            restore_or_build_system_prompt(
+                agent,
+                system_message,
+                conversation_history,
+            )
 
     active_system_prompt = agent._cached_system_prompt
 
