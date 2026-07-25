@@ -180,10 +180,13 @@ def main() -> int:
         if pcontainers.returncode != 0:
             raise RuntimeError(f"Portainer failed\n{pcontainers.stderr}")
         containers = json.loads(pcontainers.stdout)
-        running_count = sum(1 for c in containers if c.get("state") == "running")
-        stopped = [c for c in containers if c.get("state") in ("created", "exited")]
-        stopped_count = len(stopped)
-        issues = ", ".join(f"{c.get('name', 'unknown')} ({c.get('status', 'unknown')})" for c in stopped) or "all healthy"
+        running = [c for c in containers if c.get("state") == "running"]
+        running_issues = [
+            f"{c.get('name', 'unknown')} ({c.get('status', 'unknown')})"
+            for c in running
+            if any(marker in str(c.get("status", "")).lower() for marker in ("unhealthy", "restarting", "paused", "dead"))
+        ]
+        server_status = ", ".join(running_issues) if running_issues else "normal"
 
         pdisk = run(UNRAID + ["array"], timeout=20)
         if pdisk.returncode != 0:
@@ -229,7 +232,7 @@ def main() -> int:
                 "### Health",
                 f"- Steps: {steps} · Sleep: {sleep_display} · HRV: {hrv}ms · BB: {bb_cur}→{bb_max} · Stress: {stress}",
                 "### Server",
-                f"- Containers: {running_count} running, {stopped_count} stopped · {issues}",
+                f"- Containers: {server_status}",
                 f"- Disk: array {array_used}% · cache {cache_used}%",
                 "### Inbox",
                 f"- {gmail_text}",
@@ -258,7 +261,7 @@ def main() -> int:
             "Low body battery max suggests recovery needed." if bb_max < 50 else
             "Elevated stress detected — consider recovery protocols." if stress > 30 else
             "Cache nearly full — monitor for performance impact." if cache_used > 90 else
-            "Several containers stopped — review if intentional." if stopped_count >= 5 else
+            "Running container issue detected — review the affected service." if running_issues else
             f"Cache disk usage at {cache_used}%."
         )
 
@@ -281,9 +284,7 @@ def main() -> int:
                 "stress": stress,
             },
             "server": {
-                "running_count": running_count,
-                "stopped_count": stopped_count,
-                "status": issues,
+                "status": server_status,
                 "array_used": array_used,
                 "cache_used": cache_used,
             },
