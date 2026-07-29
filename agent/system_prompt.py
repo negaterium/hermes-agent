@@ -354,21 +354,35 @@ def build_system_prompt_parts(
     # cache), so the brief tells the model to re-check git before relying on it.
     coding_workspace_parts: List[str] = []
     coding_trailing_parts: List[str] = []
+    post_workspace_parts: List[str] = stable_parts
     if agent.valid_tool_names:
         try:
-            from agent.coding_context import coding_system_blocks
-
-            stable_parts.extend(
-                coding_system_blocks(
+            # Keep compatibility with the DarkServer split-tier helper while
+            # accepting upstream's consolidated coding_system_blocks API.
+            from agent import coding_context
+            if hasattr(coding_context, "coding_system_prompt_parts"):
+                coding_prefix_parts, coding_workspace_parts, coding_trailing_parts = coding_context.coding_system_prompt_parts(
                     platform=agent.platform,
                     cwd=resolve_context_cwd(),
                     model=agent.model,
                 )
-            )
+                stable_parts.extend(coding_prefix_parts)
+                if coding_workspace_parts:
+                    post_workspace_parts = []
+                else:
+                    stable_parts.extend(coding_trailing_parts)
+                    post_workspace_parts = stable_parts
+            else:
+                stable_parts.extend(
+                    coding_context.coding_system_blocks(
+                        platform=agent.platform,
+                        cwd=resolve_context_cwd(),
+                        model=agent.model,
+                    )
+                )
         except Exception:
             # Coding-context probing must never block prompt build.
             pass
-    post_workspace_parts: List[str] = stable_parts
 
     # Local Python toolchain probe — names python/pip/uv/PEP-668 state when
     # something is non-default so the model can pick the right install
