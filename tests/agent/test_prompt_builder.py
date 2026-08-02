@@ -303,6 +303,20 @@ class TestBuildSkillsSystemPrompt:
         # "search" should appear only once per category
         assert result.count("- search") == 1
 
+    def test_query_filter_uses_visible_skill_entries(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "debugging" / "systematic-debugging"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: systematic-debugging\n"
+            "description: Debug unexpected failures\n---\n"
+        )
+
+        result = build_skills_system_prompt(query="debug failures")
+
+        assert "systematic-debugging" in result
+        assert "candidate_skills" in result
+
 
     def test_compact_categories_demote_nested_and_miss_cache_separately(
         self, monkeypatch, tmp_path

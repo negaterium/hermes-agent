@@ -2147,6 +2147,11 @@ def build_skills_system_prompt(
             desc = f"[name collision — also exists {'personally' if org_id else 'in your org'}; load via category path] {desc}".strip()
         skills_by_category.setdefault(category, []).append((fm, desc))
 
+    # Candidate selection operates on the same visible entries used for
+    # collision labeling. Keep this list alive for both snapshot and cold
+    # filesystem paths; external entries are appended below.
+    available_skill_entries = visible_entries
+
     if snapshot is None:
         # (continuation of the cold path below: category descriptions + write)
         # Read category-level DESCRIPTION.md files
