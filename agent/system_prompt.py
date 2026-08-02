@@ -346,27 +346,34 @@ def build_system_prompt_parts(
         stable_parts.append(_env_hints)
 
     # Coding posture (base Hermes, any interactive coding surface in a code
-    # workspace — see agent/coding_context.py). The operating brief + the live
-    # git/workspace snapshot are built once here and cached for the session;
-    # the snapshot is never re-probed per turn (that would break the prompt
-    # cache), so the brief tells the model to re-check git before relying on it.
+    # workspace — see agent/coding_context.py). Keep the operating brief in
+    # the cross-session-stable prefix, while placing the live git/workspace
+    # snapshot behind its own cache boundary. The post-snapshot blocks must
+    # stay in their historical position after the workspace snapshot.
     coding_workspace_parts: List[str] = []
     coding_trailing_parts: List[str] = []
     if agent.valid_tool_names:
         try:
-            from agent.coding_context import coding_system_blocks
+            from agent.coding_context import coding_system_prompt_parts
 
-            stable_parts.extend(
-                coding_system_blocks(
-                    platform=agent.platform,
-                    cwd=resolve_context_cwd(),
-                    model=agent.model,
-                )
+            coding_prefix_parts, coding_workspace_parts, coding_trailing_parts = coding_system_prompt_parts(
+                platform=agent.platform,
+                cwd=resolve_context_cwd(),
+                model=agent.model,
             )
+            stable_parts.extend(coding_prefix_parts)
         except Exception:
             # Coding-context probing must never block prompt build.
             pass
-    post_workspace_parts: List[str] = stable_parts
+
+    # Guidance assembled after the coding posture historically followed the
+    # workspace snapshot. With no snapshot, the coding tail instead remains
+    # directly after the coding prefix in the cacheable prefix.
+    if coding_workspace_parts:
+        post_workspace_parts: List[str] = []
+    else:
+        stable_parts.extend(coding_trailing_parts)
+        post_workspace_parts = stable_parts
 
     # Local Python toolchain probe — names python/pip/uv/PEP-668 state when
     # something is non-default so the model can pick the right install
