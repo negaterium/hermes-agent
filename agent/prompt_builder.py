@@ -1858,43 +1858,6 @@ def _write_skills_snapshot(
         logger.debug("Could not write skills prompt snapshot: %s", e)
 
 
-def _build_snapshot_entry(
-    skill_file: Path,
-    skills_dir: Path,
-    frontmatter: dict,
-    description: str,
-) -> dict:
-    """Build a serialisable metadata dict for one skill."""
-    rel_path = skill_file.relative_to(skills_dir)
-    parts = rel_path.parts
-    if len(parts) >= 2:
-        skill_name = parts[-2]
-        category = "/".join(parts[:-2]) if len(parts) > 2 else parts[0]
-    else:
-        category = "general"
-        skill_name = skill_file.parent.name
-
-    platforms = frontmatter.get("platforms") or []
-    if isinstance(platforms, str):
-        platforms = [platforms]
-
-    metadata = frontmatter.get("metadata") if isinstance(frontmatter.get("metadata"), dict) else {}
-    hermes_metadata = metadata.get("hermes") if isinstance(metadata.get("hermes"), dict) else {}
-    tags = hermes_metadata.get("tags") or []
-    if isinstance(tags, str):
-        tags = [tags]
-
-    return {
-        "skill_name": skill_name,
-        "category": category,
-        "frontmatter_name": str(frontmatter.get("name", skill_name)),
-        "description": description,
-        "platforms": [str(p).strip() for p in platforms if str(p).strip()],
-        "conditions": extract_skill_conditions(frontmatter),
-        "tags": [str(tag).strip() for tag in tags if str(tag).strip()],
-    }
-
-
 def _normalize_skill_query_terms(text: str) -> list[str]:
     normalized = re.sub(r"[^a-z0-9]+", " ", (text or "").lower())
     return [
