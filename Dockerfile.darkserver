@@ -16,9 +16,22 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ENV PATH="/root/.cargo/bin:/root/.local/bin:$PATH"
 ENV QMD_DATA_DIR="/root/.hermes/qmd"
+# Keep the browser payload in the immutable image, outside the /root/.hermes
+# volume overlay.  darkserver-start.sh discovers the executable at runtime
+# and exports AGENT_BROWSER_EXECUTABLE_PATH for agent-browser.
+ENV PLAYWRIGHT_BROWSERS_PATH="/opt/hermes/.playwright"
 
 WORKDIR /app
 COPY . /app
+
+# Install Hermes' browser CLI and its Chromium shell into the image.  The
+# runtime starts without a display, so the headless shell is sufficient and
+# avoids downloading the full browser bundle.  Pinning comes from the checked
+# in package-lock.json; do not use a floating global agent-browser install.
+RUN npm install --workspaces=false --no-audit --fetch-retries=5 \
+    && npm install --no-save --no-audit --fetch-retries=5 playwright@1.58.2 \
+    && ./node_modules/.bin/playwright install --with-deps chromium --only-shell \
+    && npm cache clean --force
 
 RUN npm install -g @tobilu/qmd \
     && node - <<'EOF'

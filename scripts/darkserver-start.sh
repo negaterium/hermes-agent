@@ -9,6 +9,22 @@ QMD_DATA_DIR="${QMD_DATA_DIR:-/root/.hermes/qmd}"
 OBS_SYNC_SCRIPT_SRC="/app/scripts/obsidian_sync.py"
 OBS_SYNC_SCRIPT_DST="/root/.hermes/scripts/obsidian_sync.py"
 
+# agent-browser does not discover the Playwright headless-shell layout by
+# itself.  Resolve the baked image binary and pass it explicitly.  Honour a
+# user override for custom Chrome/Chromium installations.
+if [ -z "${AGENT_BROWSER_EXECUTABLE_PATH:-}" ] && [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ] && [ -d "$PLAYWRIGHT_BROWSERS_PATH" ]; then
+  browser_bin="$(find "$PLAYWRIGHT_BROWSERS_PATH" -type f -executable \
+    \( -name 'chrome' -o -name 'chromium' -o -name 'chrome-headless-shell' \
+       -o -name 'headless_shell' -o -name 'chromium-browser' \) \
+    2>/dev/null | head -n 1)"
+  if [ -n "$browser_bin" ]; then
+    export AGENT_BROWSER_EXECUTABLE_PATH="$browser_bin"
+    echo "[darkserver-start] using Chromium: $browser_bin" >&2
+  else
+    echo "[darkserver-start] WARNING: no Chromium binary found under $PLAYWRIGHT_BROWSERS_PATH" >&2
+  fi
+fi
+
 mkdir -p "$QMD_LOG_DIR" "$QMD_DATA_DIR" "$(dirname "$OBS_SYNC_SCRIPT_DST")"
 
 if [ -f "$OBS_SYNC_SCRIPT_SRC" ]; then
