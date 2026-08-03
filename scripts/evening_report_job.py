@@ -36,7 +36,13 @@ def run(
     timeout: int = 25,
 ) -> subprocess.CompletedProcess[str]:
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"command timed out after {timeout}s: {' '.join(cmd)}") from exc
     if check and proc.returncode != 0:
