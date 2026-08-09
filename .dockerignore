@@ -2,6 +2,7 @@
 .git
 .gitignore
 .gitmodules
+.worktrees/
 
 # Python
 __pycache__
@@ -27,6 +28,13 @@ node_modules
 .notebooklm-playwright/
 .pip-cache/
 .uv-cache/
+/venv/
+*.egg-info/
+
+# Python caches / build artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
 
 # Built artifacts that are regenerated inside the image.  Excluded so local
 # rebuilds on the developer's machine don't invalidate the npm-install layer
@@ -37,9 +45,23 @@ ui-tui/packages/hermes-ink/dist/
 # CI/CD
 .github
 
+# Local planning / shell state
+.plans/
+.envrc
+.vscode/
+.direnv/
+.nix-stamps/
+
 # Environment files
 .env
 .env.*
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.development
+.env.test
+export*
 
 # IDE
 .vscode/
@@ -59,6 +81,9 @@ htmlcov/
 data/
 .hermes-docker/
 .notebooklm-home/
+logs/
+tmp/
+result
 
 # Compose/profile runtime state (bind-mounted; avoid ownership/secret issues)
 hermes-config/

@@ -24,6 +24,7 @@ def _make_agent(**overrides):
         platform="",
         pass_session_id=False,
         session_id="",
+        _emit_status=lambda _message: None,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -152,7 +153,6 @@ def test_coding_prompt_preserves_legacy_workspace_order(monkeypatch):
     )
     expected = "\n\n".join((
         "IDENTITY",
-        "HELP",
         "STEER",
         "CODING_STABLE",
         "WORKSPACE",
@@ -182,7 +182,7 @@ def test_coding_prompt_preserves_legacy_workspace_order(monkeypatch):
         prompt = build_system_prompt(agent, system_message="SYSTEM_MESSAGE")
 
     assert prompt == expected
-    assert agent._cached_system_prompt_static == "\n\n".join(expected.split("\n\n")[:4])
+    assert agent._cached_system_prompt_static == "\n\n".join(expected.split("\n\n")[:3])
 
 
 class TestTelegramRichMessagesHint:
@@ -193,7 +193,8 @@ class TestTelegramRichMessagesHint:
         agent = _make_agent(platform="telegram")
         with patch("hermes_cli.config.load_config_readonly") as mock_cfg:
             mock_cfg.return_value = {
-                "gateway": {"platforms": {"telegram": {"extra": {"rich_messages": False}}}}
+                "gateway": {"platforms": {"telegram": {"extra": {"rich_messages": False}}}},
+                "platforms": {"telegram": {"extra": {"rich_messages": False}}},
             }
             stable = _stable_prompt(agent)
         assert "Standard Markdown is automatically converted" in stable
@@ -218,10 +219,9 @@ class TestTelegramRichMessagesHint:
         alongside gateway.platforms, so it works on its own."""
         agent = _make_agent(platform="telegram")
         with patch("hermes_cli.config.load_config_readonly") as mock_cfg:
-            mock_cfg.return_value = {
-                "platforms": {"telegram": {"extra": {"rich_messages": True}}}
-            }
+            mock_cfg.return_value = {"platforms": {"telegram": {"extra": {"rich_messages": True}}}}
             stable = _stable_prompt(agent)
+        assert "Standard Markdown is automatically converted" in stable
         assert "lean into it" in stable
         assert "task lists" in stable
 
@@ -250,7 +250,6 @@ class TestTelegramRichMessagesHint:
         assert "lean into it" in stable
 
     def test_base_hint_without_config(self, monkeypatch):
-        """When config has no telegram section, only base hint is used."""
         agent = _make_agent(platform="telegram")
         with patch("hermes_cli.config.load_config_readonly") as mock_cfg:
             mock_cfg.return_value = {}
@@ -339,3 +338,15 @@ class TestSkillsInVolatileBand:
         full = _build(build_system_prompt)
         assert full.index(_CONTEXT) < full.index(_SKILLS)
         assert full.index(_SKILLS) < full.index("Conversation started:")
+
+
+class TestToolAwarePlatformHints:
+    def test_gateway_without_media_tools_omits_media_delivery_guidance(self):
+        stable = _stable_prompt(
+            _make_agent(platform="telegram", valid_tool_names=["read_file"])
+        )
+        assert "MEDIA:" not in stable
+
+    def test_cli_and_tui_keep_local_only_cron_guidance(self):
+        for platform in ("cli", "tui"):
+            assert "LOCAL-ONLY" in _stable_prompt(_make_agent(platform=platform))
