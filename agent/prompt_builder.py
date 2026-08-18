@@ -1673,7 +1673,7 @@ def drain_truncation_warnings() -> list:
 # =========================================================================
 # Skills prompt cache
 # =========================================================================
-_SKILLS_PROMPT_CACHE_MAX = 8
+_SKILLS_PROMPT_CACHE_MAX = 32
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
 # v2: entries gained org provenance fields (org_id/org_author/rel_dir) for M2
@@ -2648,7 +2648,7 @@ def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str
     sections: List[str] = []
     seen_content: set = set()
     for directory in _agents_md_directory_chain(cwd_resolved):
-        for name in ["AGENTS.md", "agents.md"]:
+        for name in ["AGENTS.override.md", "AGENTS.md", "agents.md"]:
             candidate = directory / name
             if not candidate.exists():
                 continue
