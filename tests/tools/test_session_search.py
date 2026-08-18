@@ -208,6 +208,31 @@ class TestDiscoveryShape:
         sids = [r["session_id"] for r in result["results"]]
         assert "s_newest" not in sids
 
+    def test_parent_session_remains_searchable_after_gateway_reset(self, db):
+        """A reset child must not hide the previous session's history."""
+        db.create_session("s_yesterday", source="telegram")
+        db._conn.execute(
+            "UPDATE sessions SET end_reason = 'session_reset', ended_at = ? WHERE id = ?",
+            (time.time(), "s_yesterday"),
+        )
+        db.append_message(
+            "s_yesterday", role="user", content="Discussed Necroville and galactic nanotech"
+        )
+        db.append_message(
+            "s_yesterday", role="assistant", content="The civilisation operates at stellar scale"
+        )
+        db.create_session(
+            "s_today", source="telegram", parent_session_id="s_yesterday"
+        )
+        db.append_message("s_today", role="user", content="What is the weather today?")
+
+        result = json.loads(session_search(
+            query="Necroville", db=db, current_session_id="s_today", limit=5
+        ))
+        sids = [r["session_id"] for r in result["results"]]
+        assert "s_yesterday" in sids
+        assert "s_today" not in sids
+
 
 class TestDiscoverySort:
     def test_sort_newest_orders_by_recency(self, db):

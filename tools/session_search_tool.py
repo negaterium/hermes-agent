@@ -827,30 +827,26 @@ def _discover(
             break
         raw_sid = r["session_id"]
         resolved_sid, _ = _resolve_to_parent(db, raw_sid)
-        # Skip the current session lineage — UNLESS the content has been
-        # compression-summarised out of the live context (memory black hole
-        # after compression). Two sub-cases:
-        #
-        # Legacy rotation: the FTS hit lives in a session that itself ended
-        # with end_reason='compression'. That session's content has been
-        # replaced by a summary in the continuation child, so it must stay
-        # discoverable. A delegation child living under a compression
-        # continuation does NOT have end_reason='compression' itself, so it
-        # stays excluded.
-        #
-        # In-place compaction: the FTS hit lives on the SAME session_id as the
-        # current session, but the matched message row is an archived
-        # (active=0, compacted=1) row. The live-context load filters active=1,
-        # so that content is no longer in context — let it through.
+        # A gateway reset explicitly closes the parent session and starts a
+        # fresh context. That historical parent must remain searchable. A live
+        # delegation parent has no reset/compression boundary and remains in
+        # the child's active context, so keep it hidden.
         is_compacted_hit = _is_compacted_message(db, r.get("id"))
-        is_ended_session = _is_compression_ended(db, raw_sid)
+        historical_parent = False
         if current_lineage_root and resolved_sid == current_lineage_root:
-            if not (is_ended_session or is_compacted_hit):
+            try:
+                owner_meta = db.get_session(raw_sid) or {}
+                historical_parent = owner_meta.get("end_reason") in {
+                    "session_reset",
+                    "compression",
+                }
+            except Exception:
+                historical_parent = False
+            if raw_sid != current_session_id and not historical_parent:
                 continue
         if current_session_id and raw_sid == current_session_id:
-            # Same-session hit: only skip if the matched message is still live
-            # (active=1). Archived/compacted rows are pre-compaction content
-            # that's been summarised away — let them through.
+            # Same-session hit: skip only live rows. Archived/compacted rows
+            # are pre-compaction content that's been summarised away.
             if not is_compacted_hit:
                 continue
         if resolved_sid not in seen_sessions:
