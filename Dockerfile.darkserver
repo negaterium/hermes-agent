@@ -48,7 +48,7 @@ const src = fs.readFileSync(f, 'utf8');
 let patched = src;
 
 const legacyTarget = /const loadLlama = async \(gpu\) => await getLlama\(\{\n\s*build: "autoAttempt",\n\s*logLevel: LlamaLogLevel\.error,\n\s*gpu,\n\s*\}\);/;
-const currentTarget = /const loadLlama = async \(gpu, sourceBuildAllowed = allowBuild, buildOverride\) => await withNativeStdoutRedirectedToStderr\(\(\) => getLlama\(\{[\s\S]*?build: buildOverride \?\? \(sourceBuildAllowed \? "auto" : "never"\),[\s\S]*?logLevel: LlamaLogLevel\.error,[\s\S]*?gpu,[\s\S]*?progressLogs: false,[\s\S]*?skipDownload: !sourceBuildAllowed,[\s\S]*?\}\)\);/;
+const currentTarget = /const loadLlama = async \(gpu, sourceBuildAllowed = ([^,]+), buildOverride\) => await withNativeStdoutRedirectedToStderr\(\(\) => getLlama\(\{\n[\s\S]*?^\s*skipDownload: !sourceBuildAllowed,\n\s*\}\)\);/m;
 
 if (legacyTarget.test(src)) {
   patched = src.replace(
@@ -58,7 +58,7 @@ if (legacyTarget.test(src)) {
 } else if (currentTarget.test(src)) {
   patched = src.replace(
     currentTarget,
-    `const loadLlama = async (gpu, sourceBuildAllowed = allowBuild, buildOverride) => await withNativeStdoutRedirectedToStderr(() => getLlama({\n                build: "never",\n                logLevel: LlamaLogLevel.error,\n                gpu: false,\n                progressLogs: false,\n                skipDownload: true,\n            }));`
+    (_match, defaultExpr) => `const loadLlama = async (gpu, sourceBuildAllowed = ${defaultExpr}, buildOverride) => await withNativeStdoutRedirectedToStderr(() => getLlama({\n                build: "never",\n                logLevel: LlamaLogLevel.error,\n                gpu: false,\n                progressLogs: false,\n                skipDownload: true,\n            }));`
   );
 }
 
