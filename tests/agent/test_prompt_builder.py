@@ -17,6 +17,7 @@ from agent.prompt_builder import (
     _find_hermes_md,
     _find_git_root,
     _strip_yaml_frontmatter,
+    load_soul_md,
     build_skills_system_prompt,
     build_nous_subscription_prompt,
     build_context_files_prompt,
@@ -77,6 +78,13 @@ class TestScanContextContent:
         result = _scan_context_content(malicious, "AGENTS.md")
         assert "BLOCKED" in result
         assert "prompt_injection" in result
+
+
+class TestSoulLoading:
+    def test_load_soul_md_accepts_profile_home_override(self, tmp_path):
+        (tmp_path / "SOUL.md").write_text("profile-specific identity", encoding="utf-8")
+
+        assert load_soul_md(home_override=tmp_path) == "profile-specific identity"
 
 
 
