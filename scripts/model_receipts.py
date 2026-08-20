@@ -63,7 +63,7 @@ def window_for(args: argparse.Namespace) -> tuple[float, float, str]:
 def load_cron_names(home: Path) -> dict[str, str]:
     path = home / "cron" / "jobs.json"
     try:
-        raw = json.loads(path.read_text())
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     jobs = raw.get("jobs", raw) if isinstance(raw, dict) else raw
@@ -309,7 +309,7 @@ def main() -> int:
     output = json.dumps(report, indent=2, sort_keys=True) + "\n" if args.json else render_markdown(report)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(output)
+        args.output.write_text(output, encoding="utf-8")
     print(output, end="")
     return 0
 

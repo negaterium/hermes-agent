@@ -52,7 +52,7 @@ def run(
 
 def load_state() -> str | None:
     try:
-        data = json.loads(STATE.read_text())
+        data = json.loads(STATE.read_text(encoding="utf-8"))
     except Exception:
         return None
     value = data.get("last_sent_date") if isinstance(data, dict) else None
@@ -61,7 +61,9 @@ def load_state() -> str | None:
 
 def save_state(sent_date: str) -> None:
     STATE.parent.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps({"last_sent_date": sent_date}, ensure_ascii=False))
+    STATE.write_text(
+        json.dumps({"last_sent_date": sent_date}, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def ensure_google_deps() -> bool:
@@ -208,7 +210,11 @@ def main() -> int:
         garmin_dir = VAULT / "Personal" / "Sport" / "Garmin" / year
         garmin_file = garmin_dir / f"{month_num} - {month_name}.md"
         garmin_dir.mkdir(parents=True, exist_ok=True)
-        garmin_content = garmin_file.read_text() if garmin_file.exists() else f"# Garmin — {month_name} {year}\n"
+        garmin_content = (
+            garmin_file.read_text(encoding="utf-8")
+            if garmin_file.exists()
+            else f"# Garmin — {month_name} {year}\n"
+        )
         marker = f"## {local_date}"
         if marker not in garmin_content:
             if not garmin_content.endswith("\n"):
@@ -221,12 +227,16 @@ def main() -> int:
                 f"- Body Battery: {bb_cur} → {bb_max}\n"
                 f"- Stress: {stress} avg\n"
             )
-            garmin_file.write_text(garmin_content)
+            garmin_file.write_text(garmin_content, encoding="utf-8")
 
         session_dir = VAULT / "AI" / "Sessions"
         session_file = session_dir / f"{local_date}.md"
         session_dir.mkdir(parents=True, exist_ok=True)
-        session_content = session_file.read_text() if session_file.exists() else f"# Session — {local_date} ({now.strftime('%A')})\n"
+        session_content = (
+            session_file.read_text(encoding="utf-8")
+            if session_file.exists()
+            else f"# Session — {local_date} ({now.strftime('%A')})\n"
+        )
         report_marker = f"## Evening Report — {now.strftime('%H:%M')}"
         if report_marker not in session_content:
             lines = [
@@ -243,7 +253,7 @@ def main() -> int:
                 f"- {tomorrow_text}",
             ]
             session_content += "\n".join(lines) + "\n"
-            session_file.write_text(session_content)
+            session_file.write_text(session_content, encoding="utf-8")
 
         sync_method = "targeted-rclone-copy"
         sync_ok = True

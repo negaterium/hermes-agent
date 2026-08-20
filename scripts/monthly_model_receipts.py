@@ -137,7 +137,7 @@ def main() -> int:
         output.parent.mkdir(parents=True, exist_ok=True)
         current["routes"] = current["routes"][:args.top]
         current["cron_jobs"] = current["cron_jobs"][:args.top]
-        output.write_text(render_markdown(current))
+        output.write_text(render_markdown(current), encoding="utf-8")
         print(render_delta(current, previous))
         return 0
     except Exception as exc:
