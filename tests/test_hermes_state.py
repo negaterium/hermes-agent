@@ -831,6 +831,25 @@ class TestFTS5Search:
             normalized = (" ".join(sql.upper().split()) for sql in statements)
             return sum("WITH TARGET AS (" in sql for sql in normalized)
 
+        # Context enrichment deliberately opens a fresh read connection for
+        # each match. Trace those connections too; tracing only the cached
+        # connections makes the assertion report zero queries even though the
+        # context was correctly fetched.
+        import contextlib
+
+        original_read_ctx = db._read_ctx
+
+        @contextlib.contextmanager
+        def traced_read_ctx():
+            with original_read_ctx() as conn:
+                conn.set_trace_callback(statements.append)
+                try:
+                    yield conn
+                finally:
+                    conn.set_trace_callback(None)
+
+        db._read_ctx = traced_read_ctx
+
         try:
             projected = db.search_messages(
                 "projectionneedle", fields=("session_id", "snippet")

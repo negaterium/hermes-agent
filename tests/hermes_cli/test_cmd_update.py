@@ -84,8 +84,12 @@ def _patch_gateway_discovery():
     in this module (none of them assert on gateway restarts).
     """
     with patch("hermes_cli.gateway.find_gateway_pids", return_value=[]), \
+         patch("hermes_cli.gateway._get_service_pids", return_value=set()), \
          patch("hermes_cli.gateway.supports_systemd_services", return_value=False), \
-         patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]):
+         patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]), \
+         patch("hermes_cli.update_cmd._reload_config_modules"), \
+         patch("hermes_cli.update_cmd._reload_updated_runtime_modules"), \
+         patch("hermes_cli.update_cmd.os.kill"):
         yield
 
 

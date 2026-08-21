@@ -12,7 +12,21 @@ import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from hermes_cli.main import cmd_update
+
+
+@pytest.fixture(autouse=True)
+def _isolate_update_gateway(monkeypatch):
+    """Prevent update-flow tests from signalling the live gateway process."""
+    import hermes_cli.gateway as gateway
+
+    monkeypatch.setattr(gateway, "find_gateway_pids", lambda *a, **k: [])
+    monkeypatch.setattr(gateway, "_get_service_pids", lambda: set())
+    monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
+    monkeypatch.setattr(gateway, "find_profile_gateway_processes", lambda *a, **k: [])
+    monkeypatch.setattr("hermes_cli.update_cmd.os.kill", lambda *a, **k: None)
 
 
 def _make_run_side_effect(

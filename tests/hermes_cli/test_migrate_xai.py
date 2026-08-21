@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -201,8 +202,17 @@ class TestUnreadableExistingConfig:
 
         os.chmod(trap_config, 0o000)
         try:
-            with pytest.raises((PermissionError, RuntimeError, OSError)):
-                apply_migration(trap_config, issues, backup=False)
+            if os.geteuid() == 0:
+                # Root bypasses mode-000, so inject the filesystem failure
+                # this test is intended to protect against.
+                with patch(
+                    "hermes_cli.xai_retirement.Path.open",
+                    side_effect=PermissionError("permission denied"),
+                ), pytest.raises((PermissionError, RuntimeError, OSError)):
+                    apply_migration(trap_config, issues, backup=False)
+            else:
+                with pytest.raises((PermissionError, RuntimeError, OSError)):
+                    apply_migration(trap_config, issues, backup=False)
         finally:
             os.chmod(trap_config, 0o644)
 
