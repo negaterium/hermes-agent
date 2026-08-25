@@ -4656,6 +4656,27 @@ def _is_explicit_blocked_response(response: str) -> bool:
     return first_line.upper() in {"BLOCKED", "[BLOCKED]"}
 
 
+def _has_cron_error_marker(error: object, marker: str) -> bool:
+    """Return whether *error* begins with a scheduler marker.
+
+    Scheduler errors are either emitted directly as ``[marker] ...`` or
+    wrapped by ``run_job`` as ``RuntimeError: [marker] ...``. Do not use a
+    substring check: provider text can legitimately mention marker-looking
+    strings without representing a scheduler outcome.
+    """
+    text = str(error or "").strip()
+    if text.startswith(marker):
+        return True
+    separator = text.find(":")
+    if separator <= 0:
+        return False
+    exception_name = text[:separator].strip()
+    return (
+        exception_name == "RuntimeError"
+        and text[separator + 1 :].lstrip().startswith(marker)
+    )
+
+
 
 def _is_transient_provider_resolve_error(exc: BaseException) -> bool:
     """True when primary provider resolution failed for a transient network reason.
@@ -6416,7 +6437,7 @@ def run_job(
                 "error": error_msg,
             })
         
-        _partial_run = PARTIAL_RUN_MARKER in error_msg
+        _partial_run = _has_cron_error_marker(error_msg, PARTIAL_RUN_MARKER)
         _display_error = (
             error_msg.replace(PARTIAL_RUN_MARKER, "", 1).strip()
             if _partial_run
@@ -6957,30 +6978,30 @@ def _run_one_job_body(
             # operator was already told on a previous tick, so re-delivering
             # the same alert every tick would be spam (#73506 alert-once
             # shape).
-            partial_run = bool(error and PARTIAL_RUN_MARKER in str(error))
+            partial_run = _has_cron_error_marker(error, PARTIAL_RUN_MARKER)
             if partial_run:
                 error = str(error).replace(PARTIAL_RUN_MARKER, "", 1).strip()
 
             blocked_run = blocked_run or (
-                bool(error) and BLOCKED_RUN_MARKER in str(error)
+                _has_cron_error_marker(error, BLOCKED_RUN_MARKER)
             )
             if blocked_run:
                 error = str(error).replace(BLOCKED_RUN_MARKER, "", 1).strip()
 
-            blocked_config_silent = (
-                bool(error) and BLOCKED_CONFIG_SILENT_MARKER in str(error)
+            blocked_config_silent = _has_cron_error_marker(
+                error, BLOCKED_CONFIG_SILENT_MARKER
             )
-            blocked_config = blocked_config_silent or (
-                bool(error) and BLOCKED_CONFIG_MARKER in str(error)
+            blocked_config = blocked_config_silent or _has_cron_error_marker(
+                error, BLOCKED_CONFIG_MARKER
             )
             # Drift-guard skip (#44585): same alert-once contract as
             # blocked_config — the silent marker means the operator already
             # got the alert on a previous tick.
-            drift_skip_silent = (
-                bool(error) and DRIFT_SKIP_SILENT_MARKER in str(error)
+            drift_skip_silent = _has_cron_error_marker(
+                error, DRIFT_SKIP_SILENT_MARKER
             )
-            drift_skip = drift_skip_silent or (
-                bool(error) and DRIFT_SKIP_MARKER in str(error)
+            drift_skip = drift_skip_silent or _has_cron_error_marker(
+                error, DRIFT_SKIP_MARKER
             )
             if blocked_run and not success:
                 # Publication jobs return their own concise, auditable status

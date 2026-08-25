@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
 
-from cron.scheduler import _run_one_job_body, run_job
+from cron.scheduler import _has_cron_error_marker, _run_one_job_body, run_job
 
 
 _RUNTIME = {
@@ -142,3 +142,56 @@ def test_run_one_job_persists_explicit_blocked_status(tmp_path):
     assert mark_calls
     assert mark_calls[-1][1]["status"] == "blocked"
     assert delivered == [blocked_response]
+
+
+def test_marker_text_inside_ordinary_error_does_not_override_status(tmp_path):
+    """Marker text inside a normal error must not become an outcome marker."""
+    job = _job()
+    job["execution_id"] = "ordinary-error-execution"
+    mark_calls = []
+    ordinary_error = (
+        "RuntimeError: provider payload included [blocked] and [partial] "
+        "as literal text"
+    )
+
+    with patch("cron.scheduler._get_hermes_home", return_value=tmp_path), \
+         patch("cron.scheduler.claim_dispatch", return_value=True), \
+         patch("cron.scheduler.mark_execution_running"), \
+         patch(
+             "cron.scheduler.run_job",
+             return_value=(False, "failure output", "", ordinary_error),
+         ), \
+         patch("cron.scheduler.save_job_output", return_value=tmp_path / "out.md"), \
+         patch("cron.scheduler._deliver_result", return_value=None), \
+         patch(
+             "cron.scheduler.mark_job_run",
+             side_effect=lambda *args, **kwargs: mark_calls.append((args, kwargs)) or True,
+         ), \
+         patch("cron.scheduler.finish_execution"), \
+         patch("cron.scheduler._teardown_cron_agent"), \
+         patch("agent.secret_scope.set_secret_scope", return_value=object()), \
+         patch("agent.secret_scope.reset_secret_scope"):
+        assert _run_one_job_body(job) is True
+
+    assert mark_calls
+    assert "status" not in mark_calls[-1][1]
+
+
+def test_cron_error_marker_requires_scheduler_prefix():
+    """Only direct or exception-wrapped scheduler markers are recognized."""
+    assert _has_cron_error_marker("[partial] iteration limit", "[partial]")
+    assert _has_cron_error_marker(
+        "RuntimeError: [blocked] research unavailable", "[blocked]"
+    )
+    assert not _has_cron_error_marker(
+        "RuntimeError: provider returned [blocked]", "[blocked]"
+    )
+    assert not _has_cron_error_marker(
+        "ValueError: [partial] provider response", "[partial]"
+    )
+    assert not _has_cron_error_marker(
+        "ProviderError: [blocked] provider response", "[blocked]"
+    )
+    assert not _has_cron_error_marker(
+        "provider returned [partial]", "[partial]"
+    )
