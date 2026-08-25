@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
-    curl git bash ca-certificates gnupg ripgrep ffmpeg tini rclone \
+    curl git gh bash ca-certificates gnupg ripgrep ffmpeg tini rclone \
     libvulkan-dev glslang-tools \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
@@ -16,6 +16,9 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ENV PATH="/root/.cargo/bin:/root/.local/bin:$PATH"
 ENV QMD_DATA_DIR="/root/.hermes/qmd"
+# GitHub CLI credentials must live on the persistent Hermes bind rather than
+# the container layer, so a rebuild does not strand branch promotion auth.
+ENV GH_CONFIG_DIR="/root/.hermes/gh"
 # Keep the browser payload in the immutable image, outside the /root/.hermes
 # volume overlay.  darkserver-start.sh discovers the executable at runtime
 # and exports AGENT_BROWSER_EXECUTABLE_PATH for agent-browser.
@@ -23,6 +26,10 @@ ENV PLAYWRIGHT_BROWSERS_PATH="/opt/hermes/.playwright"
 
 WORKDIR /app
 COPY . /app
+
+# Route HTTPS GitHub authentication through gh. Its token lookup honors
+# GH_CONFIG_DIR above, while the binary/helper itself remains image-managed.
+RUN git config --system credential.https://github.com.helper '!/usr/bin/gh auth git-credential'
 
 # Install Hermes' browser CLI and its Chromium shell into the image.  The
 # runtime starts without a display, so the headless shell is sufficient and
