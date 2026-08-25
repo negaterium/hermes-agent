@@ -1784,6 +1784,15 @@ def validate_media_delivery_path(path: str, session_key: str = "") -> Optional[s
     # Docker agents emit MEDIA:/workspace/... (or other configured container
     # mount paths). Resolve those to host paths before the normal host-side
     # existence / denylist checks.
+    # A denied container credential path must not fall through to the real
+    # host path when sandbox translation refuses it. Cache mounts remain
+    # deliverable; everything else under /root/.hermes is a secret surface.
+    if candidate.startswith("/root/.hermes/") and not any(
+        candidate == container.as_posix().rstrip("/")
+        or candidate.startswith(container.as_posix().rstrip("/") + "/")
+        for _, container in _cache_dir_container_mounts()
+    ):
+        return None
     translated = _translate_docker_container_media_path(expanded, session_key=session_key)
     if translated is not None:
         resolved = translated
