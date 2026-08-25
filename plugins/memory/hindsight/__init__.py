@@ -46,6 +46,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from agent.secret_scope import get_secret
+from agent.durable_memory_guard import guard_durable_memory_content
 
 from agent.memory_provider import MemoryProvider, RecallStatus
 from hermes_constants import get_hermes_home
@@ -1873,6 +1874,22 @@ class HindsightMemoryProvider(MemoryProvider):
             return True
         return False
 
+    def _safe_recalled_text(self, text: str, source: str) -> str:
+        """Scrub secrets and suppress transient payloads before model exposure."""
+        # ``source`` is an internal provenance label for logging, not raw
+        # session context. Passing labels such as "tool recall result" into
+        # the guard would classify every recall as transient solely because
+        # the label contains the word "tool".
+        decision = guard_durable_memory_content(text)
+        if decision.blocked_reason:
+            logger.warning(
+                "Hindsight %s result omitted from model context: %s",
+                source,
+                decision.blocked_reason,
+            )
+            return ""
+        return decision.content
+
     def _do_recall(self, query: str) -> _RecallResult:
         """Run one recall/reflect for *query*.
 
@@ -1890,7 +1907,10 @@ class HindsightMemoryProvider(MemoryProvider):
                 logger.debug("Recall: calling reflect (bank=%s, query_len=%d)", self._bank_id, len(query))
                 resp = self._run_hindsight_operation(lambda client: client.areflect(bank_id=self._bank_id, query=query, budget=self._budget))
                 # Reflect synthesizes across many memories -> no discrete count.
-                return _RecallResult(resp.text or "", 0)
+                return _RecallResult(
+                    self._safe_recalled_text(resp.text or "", "reflect result"),
+                    0,
+                )
             recall_kwargs: dict = {
                 "bank_id": self._bank_id, "query": query,
                 "budget": self._budget, "max_tokens": self._recall_max_tokens,
@@ -1903,9 +1923,16 @@ class HindsightMemoryProvider(MemoryProvider):
             logger.debug("Recall: calling recall (bank=%s, query_len=%d, budget=%s)",
                          self._bank_id, len(query), self._budget)
             resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
-            num_results = len(resp.results) if resp.results else 0
-            logger.debug("Recall: returned %d results", num_results)
-            text = "\n".join(f"- {r.text}" for r in resp.results if r.text) if resp.results else ""
+            safe_results = []
+            for result in resp.results or []:
+                if not result.text:
+                    continue
+                safe_text = self._safe_recalled_text(result.text, "recall result")
+                if safe_text:
+                    safe_results.append(safe_text)
+            num_results = len(safe_results)
+            logger.debug("Recall: returned %d safe results", num_results)
+            text = "\n".join(f"- {result}" for result in safe_results)
             return _RecallResult(text, num_results)
         except Exception as e:
             logger.debug("Hindsight recall failed: %s", e, exc_info=True)
@@ -2092,6 +2119,14 @@ class HindsightMemoryProvider(MemoryProvider):
             logger.debug("sync_turn: skipped (shutting down)")
             return
 
+        user_decision = guard_durable_memory_content(user_content, context="conversation turn")
+        assistant_decision = guard_durable_memory_content(assistant_content, context="conversation turn")
+        if user_decision.blocked_reason or assistant_decision.blocked_reason:
+            logger.info("sync_turn: skipped because the turn contains transient content")
+            return
+        user_content = user_decision.content
+        assistant_content = assistant_decision.content
+
         if session_id:
             self._session_id = str(session_id).strip()
 
@@ -2207,6 +2242,12 @@ class HindsightMemoryProvider(MemoryProvider):
             if not content:
                 return tool_error("Missing required parameter: content")
             context = args.get("context")
+            decision = guard_durable_memory_content(content, context=context)
+            if decision.blocked_reason:
+                return tool_error(
+                    f"Durable-memory promotion blocked: {decision.blocked_reason}",
+                )
+            content = decision.content
             try:
                 item = self._build_retain_kwargs(
                     content,
@@ -2245,11 +2286,18 @@ class HindsightMemoryProvider(MemoryProvider):
                 logger.debug("Tool hindsight_recall: bank=%s, query_len=%d, budget=%s",
                              self._bank_id, len(query), self._budget)
                 resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
-                num_results = len(resp.results) if resp.results else 0
-                logger.debug("Tool hindsight_recall: %d results", num_results)
-                if not resp.results:
+                safe_results = []
+                for result in resp.results or []:
+                    if not result.text:
+                        continue
+                    safe_text = self._safe_recalled_text(result.text, "tool recall result")
+                    if safe_text:
+                        safe_results.append(safe_text)
+                num_results = len(safe_results)
+                logger.debug("Tool hindsight_recall: %d safe results", num_results)
+                if not safe_results:
                     return json.dumps({"result": "No relevant memories found."})
-                lines = [f"{i}. {r.text}" for i, r in enumerate(resp.results, 1)]
+                lines = [f"{i}. {text}" for i, text in enumerate(safe_results, 1)]
                 return json.dumps({"result": "\n".join(lines)})
             except Exception as e:
                 logger.warning("hindsight_recall failed: %s", e, exc_info=True)

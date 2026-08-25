@@ -35,6 +35,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from utils import atomic_write_text, is_truthy_value
 from tools.registry import no_cache_check_fn
+from agent.durable_memory_guard import guard_durable_memory_content
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
 msvcrt = None
@@ -97,6 +98,33 @@ from tools.threat_patterns import first_threat_message as _first_threat_message
 def _scan_memory_content(content: str) -> Optional[str]:
     """Scan memory content for injection/exfil patterns. Returns error string if blocked."""
     return _first_threat_message(content, scope="strict")
+
+
+def _prepare_durable_memory_content(content: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Scrub secrets or reject transient payloads before durable writes."""
+    decision = guard_durable_memory_content(content)
+    if decision.blocked_reason:
+        return None, f"Blocked durable-memory promotion: {decision.blocked_reason}."
+    return decision.content, None
+
+
+def _prepare_memory_operations(
+    operations: List[Dict[str, Any]],
+) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """Return a sanitized copy of add/replace operations for all write paths."""
+    prepared: List[Dict[str, Any]] = []
+    for index, raw_operation in enumerate(operations):
+        operation = dict(raw_operation or {})
+        action = operation.get("action")
+        if action in {"add", "replace"}:
+            key = "content" if operation.get("content") is not None else "new_text"
+            if key in operation:
+                content, error = _prepare_durable_memory_content(operation.get(key))
+                if error:
+                    return None, f"Operation {index + 1}: {error}"
+                operation[key] = content
+        prepared.append(operation)
+    return prepared, None
 
 
 def _drift_error(path: "Path", bak_path: str) -> Dict[str, Any]:
@@ -283,7 +311,19 @@ class MemoryStore:
             if not entry or entry.startswith("[BLOCKED:"):
                 sanitized.append(entry)
                 continue
-            findings = scan_for_threats(entry, scope="strict")
+            decision = guard_durable_memory_content(entry)
+            if decision.blocked_reason:
+                logger.warning(
+                    "Memory entry from %s omitted from prompt snapshot: %s",
+                    filename, decision.blocked_reason,
+                )
+                sanitized.append(
+                    f"[BLOCKED: {filename} entry was not eligible for durable "
+                    "semantic memory. Removed from system prompt.]"
+                )
+                continue
+            entry_for_snapshot = decision.content
+            findings = scan_for_threats(entry_for_snapshot, scope="strict")
             if findings:
                 logger.warning(
                     "Memory entry from %s blocked at load time: %s",
@@ -296,7 +336,7 @@ class MemoryStore:
                     f"to delete the original.]"
                 )
             else:
-                sanitized.append(entry)
+                sanitized.append(entry_for_snapshot)
         return sanitized
 
     @staticmethod
@@ -417,6 +457,12 @@ class MemoryStore:
         if not content:
             return {"success": False, "error": "Content cannot be empty."}
 
+        prepared_content, guard_error = _prepare_durable_memory_content(content)
+        if guard_error:
+            return {"success": False, "error": guard_error}
+        assert prepared_content is not None
+        content = prepared_content
+
         # Scan for injection/exfiltration before accepting
         scan_error = _scan_memory_content(content)
         if scan_error:
@@ -478,6 +524,12 @@ class MemoryStore:
             return {"success": False, "error": "old_text cannot be empty."}
         if not new_content:
             return {"success": False, "error": "new_content cannot be empty. Use 'remove' to delete entries."}
+
+        prepared_content, guard_error = _prepare_durable_memory_content(new_content)
+        if guard_error:
+            return {"success": False, "error": guard_error}
+        assert prepared_content is not None
+        new_content = prepared_content
 
         # Scan replacement content for injection/exfiltration
         scan_error = _scan_memory_content(new_content)
@@ -599,11 +651,21 @@ class MemoryStore:
         if not operations:
             return {"success": False, "error": "operations list is empty."}
 
+        # Sanitize every add/replace content before the optional approval gate
+        # or touching disk. A single transient/poisoned op rejects the batch.
+        prepared_operations, guard_error = _prepare_memory_operations(operations)
+        if guard_error:
+            return {"success": False, "error": guard_error}
+        assert prepared_operations is not None
+        operations = prepared_operations
+
         # Scan every add/replace content for injection/exfil BEFORE touching
         # disk -- a single poisoned op rejects the whole batch.
         for i, op in enumerate(operations):
             act = (op or {}).get("action")
             new_content = (op or {}).get("content")
+            if new_content is None:
+                new_content = (op or {}).get("new_text")
             if act in {"add", "replace"} and new_content:
                 scan_error = _scan_memory_content(new_content)
                 if scan_error:
@@ -1130,10 +1192,14 @@ def memory_tool(
     if operations:
         if not isinstance(operations, list):
             return tool_error("operations must be a list of {action, content?, old_text?} objects.", success=False)
-        gate_result = _apply_batch_write_gate(target, operations)
+        prepared_operations, guard_error = _prepare_memory_operations(operations)
+        if guard_error:
+            return tool_error(guard_error, success=False)
+        assert prepared_operations is not None
+        gate_result = _apply_batch_write_gate(target, prepared_operations)
         if gate_result is not None:
             return gate_result
-        result = store.apply_batch(target, operations)
+        result = store.apply_batch(target, prepared_operations)
         return json.dumps(result, ensure_ascii=False)
 
     # --- Single-op path ---------------------------------------------------
@@ -1152,6 +1218,13 @@ def memory_tool(
         return tool_error(f"{missing} is required for 'replace' action.", success=False)
     if action == "remove" and not old_text:
         return _missing_old_text_error(store, target, "remove")
+
+    if action in {"add", "replace"}:
+        prepared_content, guard_error = _prepare_durable_memory_content(content)
+        if guard_error:
+            return tool_error(guard_error, success=False)
+        assert prepared_content is not None
+        content = prepared_content
 
     # Approval gate: when on, stages the write (background/gateway) or prompts
     # inline (interactive CLI); when off (default) passes straight through.
