@@ -1636,7 +1636,20 @@ def _translate_docker_container_media_path(candidate: Path) -> Optional[Path]:
         pass
 
     mounts = list(_parse_docker_volume_mounts())
-    mounts.extend(_cache_dir_container_mounts())
+    cache_mounts = _cache_dir_container_mounts()
+    mounts.extend(cache_mounts)
+    # The container's /root/.hermes tree is a credential surface. Only the
+    # explicitly mounted cache subdirectories are deliverable; translating an
+    # arbitrary /root/.hermes/auth.json through the sandbox home would move it
+    # outside the host-side credential denylist.
+    if candidate_posix := candidate.as_posix():
+        hermes_prefix = "/root/.hermes/"
+        if candidate_posix.startswith(hermes_prefix) and not any(
+            candidate_posix == container.as_posix().rstrip("/")
+            or candidate_posix.startswith(container.as_posix().rstrip("/") + "/")
+            for _, container in cache_mounts
+        ):
+            return None
     # Synthetic /workspace mount for default persistent sandbox / cwd bind.
     default_ws = _default_docker_workspace_host_root()
     if default_ws is not None and not any(c.as_posix() == "/workspace" for _, c in mounts):
@@ -1722,6 +1735,12 @@ def validate_media_delivery_path(path: str) -> Optional[str]:
     # Docker agents emit MEDIA:/workspace/... (or other configured container
     # mount paths). Resolve those to host paths before the normal host-side
     # existence / denylist checks.
+    if candidate.startswith("/root/.hermes/") and not any(
+        candidate == container.as_posix().rstrip("/")
+        or candidate.startswith(container.as_posix().rstrip("/") + "/")
+        for _, container in _cache_dir_container_mounts()
+    ):
+        return None
     translated = _translate_docker_container_media_path(expanded)
     if translated is not None:
         resolved = translated

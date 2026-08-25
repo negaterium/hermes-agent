@@ -188,7 +188,7 @@ async def test_full_dispatch_rejects_lease_timeout_without_running_goal_hook(
     )
     assert holder is not None
     monkeypatch.setenv("HERMES_AGENT_TIMEOUT", "5")
-    monkeypatch.setenv("HERMES_TURN_LEASE_TIMEOUT", "0.02")
+    monkeypatch.setenv("HERMES_TURN_LEASE_TIMEOUT", "0.05")
 
     runner.session_store.load_transcript.side_effect = AssertionError(
         "transcript must not load after a turn-lease timeout"
@@ -200,7 +200,9 @@ async def test_full_dispatch_rejects_lease_timeout_without_running_goal_hook(
     runner._post_turn_goal_continuation = AsyncMock()
 
     try:
-        response = await asyncio.wait_for(runner._handle_message(_event()), timeout=1)
+        # Keep the lease rejection short, but leave enough wall time for the
+        # isolated runner/bootstrap work before the handler reaches it.
+        response = await asyncio.wait_for(runner._handle_message(_event()), timeout=3)
     finally:
         assert runner._turn_leases.release(holder) is True
 

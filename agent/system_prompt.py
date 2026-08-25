@@ -40,7 +40,6 @@ from agent.prompt_builder import (
     KANBAN_GUIDANCE,
     MEMORY_GUIDANCE,
     USER_PROFILE_GUIDANCE,
-    OPENAI_MODEL_EXECUTION_GUIDANCE,
     PARALLEL_TOOL_CALL_GUIDANCE,
     PLATFORM_HINTS,
     SESSION_SEARCH_GUIDANCE,
@@ -50,6 +49,8 @@ from agent.prompt_builder import (
     TELEGRAM_RICH_MESSAGES_HINT,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
+    build_openai_model_execution_guidance,
+    build_platform_hint,
     drain_truncation_warnings,
 )
 from agent.runtime_cwd import resolve_context_cwd
@@ -338,7 +339,11 @@ def _profile_name_for_home(home: Path) -> str:
         return "default"
 
 
-def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) -> Dict[str, str]:
+def build_system_prompt_parts(
+    agent: Any,
+    system_message: Optional[str] = None,
+    skill_query: Optional[str] = None,
+) -> Dict[str, str]:
     """Assemble the system prompt as three ordered cache tiers.
 
     Returns a dict with three keys:
@@ -500,7 +505,6 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             # paths, parallel tool calls, verify-before-edit, etc.)
             if "gemini" in _model_lower or "gemma" in _model_lower:
                 stable_parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
-
     # Execution-discipline guidance (tool persistence, mandatory tool use
     # for arithmetic, external-write read-back, count reconciliation,
     # literal preservation, verification-gated completion).  Historically
@@ -529,8 +533,12 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             model_lower = (agent.model or "").lower()
             _exec_inject = any(p in model_lower for p in EXECUTION_GUIDANCE_MODELS)
         if _exec_inject:
-            from agent.prompt_builder import execution_guidance_text
-            stable_parts.append(execution_guidance_text(agent.valid_tool_names))
+            # Keep the upstream independent gate, but retain DarkServer's
+            # tool-aware rendering.  The static block would instruct models
+            # to use tools that are not present in the live session.
+            stable_parts.append(
+                build_openai_model_execution_guidance(agent.valid_tool_names)
+            )
 
     has_skills_tools = any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
     if has_skills_tools:
@@ -557,6 +565,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         skills_prompt = _r.build_skills_system_prompt(
             available_tools=agent.valid_tool_names,
             available_toolsets=avail_toolsets,
+            query=skill_query,
             compact_categories=_compact_cats or None,
             skills_dir_override=_agent_skills_dir(agent),
         )
@@ -739,7 +748,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # any per-platform override from config (platform_hints.<platform>).
     _default_hint = ""
     if platform_key in PLATFORM_HINTS:
-        _default_hint = PLATFORM_HINTS[platform_key]
+        _default_hint = build_platform_hint(platform_key, agent.valid_tool_names)
     elif platform_key:
         # Check plugin registry for platform-specific LLM guidance
         try:
@@ -918,7 +927,11 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     }
 
 
-def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str:
+def build_system_prompt(
+    agent: Any,
+    system_message: Optional[str] = None,
+    skill_query: Optional[str] = None,
+) -> str:
     """Assemble the full system prompt from all layers.
 
     Called once per session (cached on ``agent._cached_system_prompt``) and
@@ -935,7 +948,11 @@ def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str
     rebuilt (on compaction/restore) the unchanged stable scaffold ahead of
     the change stays in the reused prefix.
     """
-    parts = build_system_prompt_parts(agent, system_message=system_message)
+    parts = build_system_prompt_parts(
+        agent,
+        system_message=system_message,
+        skill_query=skill_query,
+    )
     joined = "\n\n".join(p for p in (parts["stable"], parts["context"], parts["volatile"]) if p)
     agent._cached_system_prompt_static = parts["stable"]
 

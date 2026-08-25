@@ -1396,6 +1396,12 @@ def _fold_home_prefixes(command: str, paths, replacement: str) -> str:
             continue
         seen.add(path)
         pattern = _home_prefix_fold_regex(path)
+        # A root user's home is commonly ``/root``. The generic matcher
+        # deliberately rejects one-component paths to avoid treating a broad
+        # directory such as ``/home`` as a home prefix, but here the caller has
+        # already supplied the resolved home path from the runtime.
+        if pattern is None and path.startswith(("/", "\\")) and path.rstrip("/\\"):
+            pattern = re.compile(re.escape(path) + _PATH_TAIL)
         if pattern is not None:
             command = pattern.sub(
                 lambda m: replacement + m.group("tail").replace("\\", "/"),

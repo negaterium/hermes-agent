@@ -12,10 +12,12 @@ from agent.prompt_builder import (
     _scan_context_content,
     _truncate_content,
     _parse_skill_file,
+    _normalize_skill_query_terms,
     _skill_should_show,
     _find_hermes_md,
     _find_git_root,
     _strip_yaml_frontmatter,
+    load_soul_md,
     build_skills_system_prompt,
     build_nous_subscription_prompt,
     build_context_files_prompt,
@@ -65,11 +67,15 @@ class TestGuidanceConstants:
         assert "durable facts" in MEMORY_GUIDANCE
         assert "Do NOT save task progress" in MEMORY_GUIDANCE
         assert "session_search" in MEMORY_GUIDANCE
+        assert "knowledge_search" in MEMORY_GUIDANCE
         assert "like a diary" not in MEMORY_GUIDANCE
         assert ">80%" not in MEMORY_GUIDANCE
 
     def test_session_search_guidance_is_simple_cross_session_recall(self):
         assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
+        assert "session_list" in SESSION_SEARCH_GUIDANCE
+        assert "session_read" in SESSION_SEARCH_GUIDANCE
+        assert "knowledge_search" in SESSION_SEARCH_GUIDANCE
         assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
 
 
@@ -89,6 +95,13 @@ class TestScanContextContent:
         result = _scan_context_content(malicious, "AGENTS.md")
         assert "BLOCKED" in result
         assert "prompt_injection" in result
+
+
+class TestSoulLoading:
+    def test_load_soul_md_accepts_profile_home_override(self, tmp_path):
+        (tmp_path / "SOUL.md").write_text("profile-specific identity", encoding="utf-8")
+
+        assert load_soul_md(home_override=tmp_path) == "profile-specific identity"
 
 
 
@@ -298,7 +311,12 @@ class TestBuildSkillsSystemPrompt:
         yield
         clear_skills_system_prompt_cache(clear_snapshot=True)
 
-
+    def test_skill_query_normalization_filters_stopwords(self):
+        assert _normalize_skill_query_terms("help me debug the Hermes gateway") == [
+            "debug",
+            "hermes",
+            "gateway",
+        ]
 
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -310,6 +328,20 @@ class TestBuildSkillsSystemPrompt:
         result = build_skills_system_prompt()
         # "search" should appear only once per category
         assert result.count("- search") == 1
+
+    def test_query_filter_uses_visible_skill_entries(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "debugging" / "systematic-debugging"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: systematic-debugging\n"
+            "description: Debug unexpected failures\n---\n"
+        )
+
+        result = build_skills_system_prompt(query="debug failures")
+
+        assert "systematic-debugging" in result
+        assert "candidate_skills" in result
 
 
     def test_compact_categories_demote_nested_and_miss_cache_separately(

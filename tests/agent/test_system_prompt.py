@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent.system_prompt import build_system_prompt, build_system_prompt_parts
+from agent.prompt_builder import build_openai_model_execution_guidance
 
 
 def _make_agent(**overrides):
@@ -146,7 +147,7 @@ class TestExecutionGuidanceInjection:
     def test_deepseek_gets_guidance_by_default(self):
         stable = self._prompt("deepseek/deepseek-v4-pro")
         assert "Execution discipline" in stable
-        assert "<external_state_verification>" in stable
+        assert build_openai_model_execution_guidance({"terminal", "read_file"}) in stable
 
     def test_kimi_gets_guidance_by_default(self):
         assert "Execution discipline" in self._prompt("moonshotai/kimi-k3")
@@ -344,7 +345,8 @@ class TestTelegramRichMessagesHint:
         agent = _make_agent(platform="telegram")
         with patch("hermes_cli.config.load_config_readonly") as mock_cfg:
             mock_cfg.return_value = {
-                "gateway": {"platforms": {"telegram": {"extra": {"rich_messages": False}}}}
+                "gateway": {"platforms": {"telegram": {"extra": {"rich_messages": False}}}},
+                "platforms": {"telegram": {"extra": {"rich_messages": False}}},
             }
             stable = _stable_prompt(agent)
         assert "Standard Markdown is automatically converted" in stable
@@ -369,10 +371,9 @@ class TestTelegramRichMessagesHint:
         alongside gateway.platforms, so it works on its own."""
         agent = _make_agent(platform="telegram")
         with patch("hermes_cli.config.load_config_readonly") as mock_cfg:
-            mock_cfg.return_value = {
-                "platforms": {"telegram": {"extra": {"rich_messages": True}}}
-            }
+            mock_cfg.return_value = {"platforms": {"telegram": {"extra": {"rich_messages": True}}}}
             stable = _stable_prompt(agent)
+        assert "Standard Markdown is automatically converted" in stable
         assert "lean into it" in stable
         assert "task lists" in stable
 
@@ -401,7 +402,6 @@ class TestTelegramRichMessagesHint:
         assert "lean into it" in stable
 
     def test_base_hint_without_config(self, monkeypatch):
-        """When config has no telegram section, only base hint is used."""
         agent = _make_agent(platform="telegram")
         with patch("hermes_cli.config.load_config_readonly") as mock_cfg:
             mock_cfg.return_value = {}
@@ -548,3 +548,15 @@ class TestMemoryProviderSystemPromptGating:
         full = _build(build_system_prompt, _memory_manager=agent._memory_manager,
                       enabled_toolsets=["web_search"], disabled_toolsets=None)
         assert block not in full
+
+
+class TestToolAwarePlatformHints:
+    def test_gateway_without_media_tools_omits_media_delivery_guidance(self):
+        stable = _stable_prompt(
+            _make_agent(platform="telegram", valid_tool_names=["read_file"])
+        )
+        assert "MEDIA:" not in stable
+
+    def test_cli_and_tui_keep_local_only_cron_guidance(self):
+        for platform in ("cli", "tui"):
+            assert "LOCAL-ONLY" in _stable_prompt(_make_agent(platform=platform))

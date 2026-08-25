@@ -170,6 +170,9 @@ from agent.prompt_builder import (  # noqa: F401  # re-exported via _ra() / mock
     build_skills_system_prompt,
     build_context_files_prompt,
     build_environment_hints,
+    build_google_model_operational_guidance,
+    build_openai_model_execution_guidance,
+    build_platform_hint,
     build_nous_subscription_prompt,
     load_soul_md,
 )
@@ -196,6 +199,8 @@ from agent.codex_responses_adapter import (
     _summarize_user_message_for_log,  # also used by _sync_external_memory_for_turn (memory boundary)
 )
 from agent.tool_guardrails import (
+    ToolCallGuardrailConfig,
+    ToolCallGuardrailController,
     ToolGuardrailDecision,
     append_toolguard_guidance,
     toolguard_synthetic_result,
@@ -2040,7 +2045,9 @@ class AIAgent:
             # finalize + error exits) so a crash after this line loses at most
             # the in-flight API call's delta. Cheap no-op when nothing queued.
             if self._session_db is not None:
-                self._session_db.flush_token_counts()
+                flush_token_counts = getattr(self._session_db, "flush_token_counts", None)
+                if callable(flush_token_counts):
+                    flush_token_counts()
             note_turn_persisted(self)
 
         if persist_lock is None:
@@ -4874,15 +4881,25 @@ class AIAgent:
 
 
 
-    def _build_system_prompt_parts(self, system_message: str = None) -> Dict[str, str]:
+    def _build_system_prompt_parts(
+        self, system_message: Optional[str] = None, skill_query: Optional[str] = None
+    ) -> Dict[str, str]:
         """Forwarder — see ``agent.system_prompt.build_system_prompt_parts``."""
         from agent.system_prompt import build_system_prompt_parts
-        return build_system_prompt_parts(self, system_message=system_message)
+        return build_system_prompt_parts(
+            self, system_message=system_message, skill_query=skill_query
+        )
 
-    def _build_system_prompt(self, system_message: str = None) -> str:
+    def _build_system_prompt(
+        self, system_message: Optional[str] = None, skill_query: Optional[str] = None
+    ) -> str:
         """Forwarder — see ``agent.system_prompt.build_system_prompt``."""
         from agent.system_prompt import build_system_prompt
-        return build_system_prompt(self, system_message=system_message)
+        return build_system_prompt(self, system_message=system_message, skill_query=skill_query)
+
+    # =========================================================================
+    # Pre/post-call guardrails (inspired by PR #1321 — @alireza78a)
+    # =========================================================================
 
     @staticmethod
     def _get_tool_call_id_static(tc) -> str:

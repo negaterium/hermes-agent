@@ -441,6 +441,14 @@ py-modules = [
   "mcp_serve",
 ]
 
+[tool.setuptools.data-files]
+# i18n catalogs and optional MCP manifests are bare data directories and must
+# be declared explicitly for sealed wheel/sdist installs.
+locales = ["locales/*.yaml"]
+"optional-mcps/linear" = ["optional-mcps/linear/manifest.yaml"]
+"optional-mcps/n8n" = ["optional-mcps/n8n/manifest.yaml"]
+"optional-mcps/unreal-engine" = ["optional-mcps/unreal-engine/manifest.yaml"]
+
 [tool.setuptools.packages.find]
 include = ["agent", "agent.*", "tools", "tools.*", "hermes_cli", "hermes_cli.*", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "cron.*", "acp_adapter", "plugins", "plugins.*", "providers", "providers.*"]
 

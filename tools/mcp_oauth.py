@@ -58,7 +58,7 @@ import webbrowser
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import parse_qs, urlparse
 from hermes_constants import secure_parent_dir
 
@@ -739,8 +739,15 @@ def _authorization_code_result(code: str, state: "str | None", iss: "str | None"
     """
     try:
         from mcp.shared.auth import AuthorizationCodeResult
-    except ImportError:  # mcp < 2.0
-        return code, state
+    except ImportError:  # mcp < 2.0 or an SDK without the model
+        # Keep tuple-unpacking compatibility with older SDKs while exposing
+        # the attribute-based contract expected by newer callback handlers.
+        class _LegacyAuthorizationCodeResult(NamedTuple):
+            code: str
+            state: str | None
+            iss: str | None = None
+
+        return _LegacyAuthorizationCodeResult(code, state, iss)
     return AuthorizationCodeResult(code=code, state=state, iss=iss)
 
 
@@ -894,7 +901,7 @@ def _make_redirect_handler(port: int, redirect_uri: str | None = None):
     return _redirect_handler
 
 
-async def _wait_for_callback() -> tuple[str, str | None]:
+async def _wait_for_callback():
     """Wait for the OAuth callback on the legacy module-level port.
 
     Kept for backwards compatibility with callers that never went through
