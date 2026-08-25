@@ -4624,12 +4624,36 @@ def _block_and_pause_job(
 BLOCKED_CONFIG_MARKER = "[blocked_config]"
 BLOCKED_CONFIG_SILENT_MARKER = "[blocked_config:silent]"
 
+# Marker prefix for an agent turn that reached its iteration budget before a
+# terminal response. ``run_one_job`` maps this to ``last_status='partial'``
+# instead of allowing a non-empty fallback response to masquerade as success.
+PARTIAL_RUN_MARKER = "[partial]"
+
+# Marker prefix used internally when a job returns an explicit ``BLOCKED``
+# status line. ``run_one_job`` maps this to ``last_status='blocked'`` instead
+# of treating a policy/source/config refusal as a successful agent turn.
+BLOCKED_RUN_MARKER = "[blocked]"
+
 # Marker prefix for a #44585 drift-guard skip. Same alert-once contract as
 # blocked_config: run_one_job keys off it to record last_status and the
 # ``:silent`` variant means "already alerted on a previous tick — do not
 # deliver again" (the drift_alerted bit on the job record, #73506 shape).
 DRIFT_SKIP_MARKER = "[drift_skip]"
 DRIFT_SKIP_SILENT_MARKER = "[drift_skip:silent]"
+
+
+def _is_explicit_blocked_response(response: str) -> bool:
+    """Return whether *response* starts with the cron ``BLOCKED`` status.
+
+    Publication jobs use a first-line status contract. Requiring the whole
+    first non-empty line to be exactly ``BLOCKED`` avoids turning ordinary
+    prose that happens to mention the word into a scheduler failure.
+    """
+    first_line = next(
+        (line.strip() for line in str(response or "").splitlines() if line.strip()),
+        "",
+    )
+    return first_line.upper() in {"BLOCKED", "[BLOCKED]"}
 
 
 
@@ -6263,10 +6287,9 @@ def run_job(
             )
             raise RuntimeError(_err_text)
         if max_iteration_summary:
-            logger.warning(
-                "Job '%s' reached the iteration limit but produced a final fallback response; "
-                "delivering the response instead of failing the cron run",
-                job_name,
+            raise RuntimeError(
+                f"{PARTIAL_RUN_MARKER} Agent reached the iteration limit before "
+                f"terminal completion: {turn_exit_reason}"
             )
 
         final_response = result.get("final_response", "") or ""
@@ -6348,7 +6371,10 @@ def run_job(
 {logged_response}
 """
         
-        logger.info("Job '%s' completed successfully", job_name)
+        if _is_explicit_blocked_response(final_response):
+            logger.warning("Job '%s' returned an explicit BLOCKED outcome", job_name)
+        else:
+            logger.info("Job '%s' completed successfully", job_name)
 
         # Emit one JSONL line per fire for usage audit.
         _audit_duration_ms = int((time.monotonic() - _audit_t_start) * 1000)
@@ -6390,7 +6416,14 @@ def run_job(
                 "error": error_msg,
             })
         
-        output = f"""# Cron Job: {job_name} (FAILED)
+        _partial_run = PARTIAL_RUN_MARKER in error_msg
+        _display_error = (
+            error_msg.replace(PARTIAL_RUN_MARKER, "", 1).strip()
+            if _partial_run
+            else error_msg
+        )
+        _status_label = "PARTIAL" if _partial_run else "FAILED"
+        output = f"""# Cron Job: {job_name} ({_status_label})
 
 **Job ID:** {job_id}
 **Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -6403,7 +6436,7 @@ def run_job(
 ## Error
 
 ```
-{error_msg}
+{_display_error}
 ```
 """
         return False, output, "", error_msg
@@ -6880,6 +6913,8 @@ def _run_one_job_body(
         # deferred agent is still torn down. Otherwise the outer `except` would
         # swallow the error and leak the agent's subprocesses/clients (#10200).
         blocked_config = False
+        blocked_run = False
+        partial_run = False
         side_effect_ownership_lost = False
         try:
             with _side_effect_fence() as owns_output:
@@ -6903,6 +6938,16 @@ def _run_one_job_body(
                     "(tool subprocess was killed mid-flight)."
                 )
 
+            # A publication job can complete its agent turn while explicitly
+            # refusing to publish (missing evidence, policy failure, duplicate,
+            # or another fail-closed condition). That is an operational failure,
+            # not a successful cron run. The exact first-line contract keeps this
+            # opt-in and avoids classifying ordinary prose as blocked.
+            if success and _is_explicit_blocked_response(final_response):
+                success = False
+                blocked_run = True
+                error = f"{BLOCKED_RUN_MARKER} {final_response.strip()}"
+
             # Deliver the final response to the origin/target chat.
             # If the agent responded with [SILENT], skip delivery (but
             # output is already saved above).  Failed jobs always deliver.
@@ -6912,6 +6957,16 @@ def _run_one_job_body(
             # operator was already told on a previous tick, so re-delivering
             # the same alert every tick would be spam (#73506 alert-once
             # shape).
+            partial_run = bool(error and PARTIAL_RUN_MARKER in str(error))
+            if partial_run:
+                error = str(error).replace(PARTIAL_RUN_MARKER, "", 1).strip()
+
+            blocked_run = blocked_run or (
+                bool(error) and BLOCKED_RUN_MARKER in str(error)
+            )
+            if blocked_run:
+                error = str(error).replace(BLOCKED_RUN_MARKER, "", 1).strip()
+
             blocked_config_silent = (
                 bool(error) and BLOCKED_CONFIG_SILENT_MARKER in str(error)
             )
@@ -6927,7 +6982,12 @@ def _run_one_job_body(
             drift_skip = drift_skip_silent or (
                 bool(error) and DRIFT_SKIP_MARKER in str(error)
             )
-            if blocked_config and not success:
+            if blocked_run and not success:
+                # Publication jobs return their own concise, auditable status
+                # report. Preserve it for delivery instead of passing it through
+                # the generic failure summarizer and losing the blocking detail.
+                deliver_content = final_response.strip() or str(error)
+            elif blocked_config and not success:
                 # Blocked-config alert: bypass the generic failure summarizer
                 # (whose auth/timeout heuristics would mislabel this as a
                 # provider runtime failure) — say plainly that config
@@ -7077,6 +7137,10 @@ def _run_one_job_body(
             mark_kwargs["expected_fire_owner"] = fire_owner
         if blocked_config:
             mark_kwargs["status"] = "blocked_config"
+        elif blocked_run:
+            mark_kwargs["status"] = "blocked"
+        elif partial_run:
+            mark_kwargs["status"] = "partial"
         marked = mark_job_run(job["id"], success, error, **mark_kwargs)
         if fire_owner is not None and not marked:
             finish_execution(
