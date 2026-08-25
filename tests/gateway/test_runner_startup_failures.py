@@ -134,6 +134,22 @@ async def test_start_gateway_replace_force_uses_terminate_pid(monkeypatch, tmp_p
         "gateway.status.release_all_scoped_locks",
         lambda **kwargs: 0,
     )
+    # Ownership guard (#89315): this is a legitimate same-home replacement;
+    # bind the persisted record to the target PID before exercising escalation.
+    monkeypatch.setattr(
+        "gateway.status._read_pid_record",
+        lambda path=None: {
+            "pid": 42,
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway", "run"],
+            "start_time": 0,
+            "hermes_home": str(tmp_path),
+        },
+    )
+    monkeypatch.setattr(
+        "gateway.status._get_process_start_time",
+        lambda pid: 0 if pid == 42 else None,
+    )
     # force-kill reaps the process: terminate_pid(force=True) flips it dead,
     # and the post-kill re-poll via _pid_exists then sees it gone so the
     # replacement proceeds.
