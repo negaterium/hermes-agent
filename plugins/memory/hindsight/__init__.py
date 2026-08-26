@@ -108,6 +108,8 @@ _PROVIDER_DEFAULT_MODELS = {
 
 _VALID_RECALL_SCORE_KEYS = {"semantic", "keyword", "reranker", "final"}
 _BOUNDED_RECALL_SCORE_KEYS = {"semantic", "reranker"}
+_VALID_RECALL_TAG_MATCHES = ("any", "all", "any_strict", "all_strict")
+_RECALL_OVERRIDE_UNSET = object()
 
 
 def _parse_bool_setting(value: Any, default: bool) -> bool:
@@ -454,6 +456,19 @@ RECALL_SCHEMA = {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "What to search for."},
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional per-call tags to filter this search. Overrides configured "
+                    "recall_tags; pass an empty array to clear the configured filter."
+                ),
+            },
+            "tags_match": {
+                "type": "string",
+                "enum": list(_VALID_RECALL_TAG_MATCHES),
+                "description": "How to match the per-call tags.",
+            },
         },
         "required": ["query"],
     },
@@ -560,6 +575,27 @@ def _normalize_retain_tags(value: Any) -> List[str]:
         seen.add(tag)
         normalized.append(tag)
     return normalized
+
+
+def _normalize_recall_tags(value: Any) -> list[str]:
+    """Normalize one tool-call tag filter, rejecting non-string containers."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return _normalize_retain_tags(value)
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("tags must be an array of strings")
+    if any(not isinstance(tag, str) for tag in value):
+        raise ValueError("tags must be an array of strings")
+    return _normalize_retain_tags(list(value))
+
+
+def _validate_recall_tags_match(value: Any) -> str:
+    """Validate a per-call tag matching mode before sending it upstream."""
+    if not isinstance(value, str) or value.strip() not in _VALID_RECALL_TAG_MATCHES:
+        choices = ", ".join(_VALID_RECALL_TAG_MATCHES)
+        raise ValueError(f"tags_match must be one of: {choices}")
+    return value.strip()
 
 
 _OBSERVATION_SCOPE_KEYWORDS = {"per_tag", "combined", "all_combinations"}
@@ -1770,7 +1806,9 @@ class HindsightMemoryProvider(MemoryProvider):
             self._config.get("observation_scopes")
             or os.environ.get("HINDSIGHT_RETAIN_OBSERVATION_SCOPES", "")
         )
-        self._recall_tags = self._config.get("recall_tags") or None
+        self._recall_tags = _normalize_retain_tags(
+            self._config.get("recall_tags")
+        ) or None
         self._recall_tags_match = self._config.get("recall_tags_match", "any")
         self._retain_source = str(
             self._config.get("retain_source") or os.environ.get("HINDSIGHT_RETAIN_SOURCE", _DEFAULT_RETAIN_SOURCE)
@@ -1975,17 +2013,40 @@ class HindsightMemoryProvider(MemoryProvider):
             item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters
         )
 
-    def _build_recall_kwargs(self, query: str, client: Any) -> dict[str, Any]:
-        """Build one quality-aware recall request for both recall call paths."""
+    def _build_recall_kwargs(
+        self,
+        query: str,
+        client: Any,
+        *,
+        tags: Any = _RECALL_OVERRIDE_UNSET,
+        tags_match: Any = _RECALL_OVERRIDE_UNSET,
+    ) -> dict[str, Any]:
+        """Build one quality-aware recall request for both recall call paths.
+
+        ``tags`` and ``tags_match`` are optional per-call overrides used by the
+        explicit ``hindsight_recall`` tool. The sentinel distinguishes an
+        omitted argument (keep configured defaults) from an empty tag list
+        (clear the configured filter for this request).
+        """
         recall_kwargs: dict[str, Any] = {
             "bank_id": self._bank_id,
             "query": query,
             "budget": self._budget,
             "max_tokens": self._recall_max_tokens,
         }
-        if self._recall_tags:
-            recall_kwargs["tags"] = self._recall_tags
-            recall_kwargs["tags_match"] = self._recall_tags_match
+        recall_tags = (
+            self._recall_tags
+            if tags is _RECALL_OVERRIDE_UNSET
+            else _normalize_recall_tags(tags)
+        )
+        recall_tags_match = (
+            self._recall_tags_match
+            if tags_match is _RECALL_OVERRIDE_UNSET
+            else _validate_recall_tags_match(tags_match)
+        )
+        if recall_tags:
+            recall_kwargs["tags"] = recall_tags
+            recall_kwargs["tags_match"] = recall_tags_match
         if self._recall_types:
             recall_kwargs["types"] = self._recall_types
 
@@ -2392,11 +2453,20 @@ class HindsightMemoryProvider(MemoryProvider):
             if not query:
                 return tool_error("Missing required parameter: query")
             try:
+                recall_overrides = {}
+                if "tags" in args:
+                    recall_overrides["tags"] = args["tags"]
+                if "tags_match" in args:
+                    recall_overrides["tags_match"] = args["tags_match"]
                 logger.debug("Tool hindsight_recall: bank=%s, query_len=%d, budget=%s",
                              self._bank_id, len(query), self._budget)
                 resp = self._run_hindsight_operation(
                     lambda client: client.arecall(
-                        **self._build_recall_kwargs(query, client)
+                        **self._build_recall_kwargs(
+                            query,
+                            client,
+                            **recall_overrides,
+                        )
                     )
                 )
                 safe_results = []

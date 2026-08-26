@@ -30,6 +30,7 @@ from plugins.memory.hindsight import (
     _build_embedded_profile_env,
     _MIN_CLIENT_VERSION,
     _normalize_observation_scopes,
+    _normalize_recall_tags,
     _normalize_retain_tags,
     _resolve_bank_id_template,
     _sanitize_bank_segment,
@@ -223,6 +224,13 @@ def test_normalize_retain_tags_accepts_csv_and_dedupes():
     ]
 
 
+def test_normalize_recall_tags_preserves_tuple_items():
+    assert _normalize_recall_tags(("profile", "briefing", "profile")) == [
+        "profile",
+        "briefing",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Schema tests
 # ---------------------------------------------------------------------------
@@ -235,6 +243,22 @@ class TestSchemas:
         assert "tags" in RETAIN_SCHEMA["parameters"]["properties"]
         assert "content" in RETAIN_SCHEMA["parameters"]["required"]
 
+    def test_recall_schema_exposes_per_call_tag_filters(self):
+        properties = RECALL_SCHEMA["parameters"]["properties"]
+
+        assert properties["tags"] == {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Optional per-call tags to filter this search. Overrides configured "
+                "recall_tags; pass an empty array to clear the configured filter."
+            ),
+        }
+        assert properties["tags_match"] == {
+            "type": "string",
+            "enum": ["any", "all", "any_strict", "all_strict"],
+            "description": "How to match the per-call tags.",
+        }
 
     def test_get_tool_schemas_returns_three(self, provider):
         schemas = provider.get_tool_schemas()
@@ -328,6 +352,13 @@ class TestConfig:
         assert p._recall_prompt_preamble == "Custom preamble:"
         assert p._recall_max_input_chars == 500
         assert p._bank_mission == "Test agent mission"
+
+    def test_recall_config_tags_accept_csv_and_dedupe(self, provider_with_config):
+        p = provider_with_config(
+            recall_tags=" profile, briefing, profile ",
+        )
+
+        assert p._recall_tags == ["profile", "briefing"]
 
     def test_retain_source_defaults_empty(self, provider):
         # Opt-in per AGENTS.md: no attribution tag ships by default.
@@ -539,6 +570,147 @@ class TestToolHandlers:
         assert captured["prefer_observations"] is True
         assert captured["min_scores"] == {"reranker": 0.05, "final": 0.0001}
 
+    def test_recall_per_call_tags_override_configured_filter(self, provider_with_config):
+        p = provider_with_config(
+            recall_tags=["configured"],
+            recall_tags_match="all",
+        )
+        captured = {}
+
+        async def _arecall(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(results=[])
+
+        p._client.arecall = _arecall
+        result = json.loads(p.handle_tool_call(
+            "hindsight_recall",
+            {
+                "query": "project decision",
+                "tags": ["profile", "briefing"],
+                "tags_match": "all_strict",
+            },
+        ))
+
+        assert result["result"] == "No relevant memories found."
+        assert captured["tags"] == ["profile", "briefing"]
+        assert captured["tags_match"] == "all_strict"
+        assert p._recall_tags == ["configured"]
+        assert p._recall_tags_match == "all"
+
+    def test_recall_without_per_call_tags_keeps_configured_filter(self, provider_with_config):
+        p = provider_with_config(
+            recall_tags=["configured"],
+            recall_tags_match="all",
+        )
+        captured = {}
+
+        async def _arecall(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(results=[])
+
+        p._client.arecall = _arecall
+        result = json.loads(p.handle_tool_call(
+            "hindsight_recall", {"query": "project decision"}
+        ))
+
+        assert result["result"] == "No relevant memories found."
+        assert captured["tags"] == ["configured"]
+        assert captured["tags_match"] == "all"
+
+    def test_recall_empty_per_call_tags_clear_configured_filter(self, provider_with_config):
+        p = provider_with_config(
+            recall_tags=["configured"],
+            recall_tags_match="all",
+        )
+        captured = {}
+
+        async def _arecall(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(results=[])
+
+        p._client.arecall = _arecall
+        result = json.loads(p.handle_tool_call(
+            "hindsight_recall",
+            {"query": "project decision", "tags": []},
+        ))
+
+        assert result["result"] == "No relevant memories found."
+        assert "tags" not in captured
+        assert "tags_match" not in captured
+        assert p._recall_tags == ["configured"]
+        assert p._recall_tags_match == "all"
+
+    @pytest.mark.parametrize("tags_match", ["any", "all"])
+    def test_recall_per_call_tags_passes_any_and_all_matching_modes(
+        self, provider, tags_match
+    ):
+        captured = {}
+
+        async def _arecall(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(results=[])
+
+        provider._client.arecall = _arecall
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_recall",
+            {
+                "query": "project decision",
+                "tags": ["profile", "briefing"],
+                "tags_match": tags_match,
+            },
+        ))
+
+        assert result["result"] == "No relevant memories found."
+        assert captured["tags"] == ["profile", "briefing"]
+        assert captured["tags_match"] == tags_match
+
+    @pytest.mark.parametrize("tags_match", ["any_strict", "all_strict"])
+    def test_recall_per_call_tags_passes_strict_matching_modes(
+        self, provider, tags_match
+    ):
+        captured = {}
+
+        async def _arecall(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(results=[])
+
+        provider._client.arecall = _arecall
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_recall",
+            {
+                "query": "project decision",
+                "tags": ["profile", "briefing"],
+                "tags_match": tags_match,
+            },
+        ))
+
+        assert result["result"] == "No relevant memories found."
+        assert captured["tags"] == ["profile", "briefing"]
+        assert captured["tags_match"] == tags_match
+
+    @pytest.mark.parametrize(
+        ("argument", "value", "message"),
+        [
+            ("tags", {"scope": "profile"}, "tags must be an array of strings"),
+            ("tags", ["profile", 7], "tags must be an array of strings"),
+            ("tags_match", "unsupported", "tags_match must be one of"),
+        ],
+    )
+    def test_recall_rejects_invalid_per_call_tag_filters(
+        self, provider, argument, value, message
+    ):
+        provider._client.arecall = AsyncMock(
+            return_value=SimpleNamespace(results=[])
+        )
+
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_recall",
+            {"query": "project decision", argument: value},
+        ))
+
+        assert message in result["error"]
+        provider._client.arecall.assert_not_awaited()
+
     def test_reflect_success(self, provider):
         result = json.loads(provider.handle_tool_call(
             "hindsight_reflect", {"query": "summarize"}
@@ -602,6 +774,43 @@ class TestPrefetch:
 
     def test_recall_sync_defaults_off(self, provider):
         assert provider._recall_sync is False
+
+    def test_automatic_recall_uses_configured_tag_defaults(self, provider_with_config):
+        p = provider_with_config(
+            recall_sync=True,
+            recall_tags=["profile", "briefing"],
+            recall_tags_match="all_strict",
+        )
+        captured = {}
+
+        async def _arecall(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(results=[])
+
+        p._client.arecall = AsyncMock(side_effect=_arecall)
+
+        assert p.prefetch("current turn") == ""
+        assert captured["tags"] == ["profile", "briefing"]
+        assert captured["tags_match"] == "all_strict"
+        p._client.arecall.assert_awaited_once()
+
+    def test_automatic_recall_defaults_to_any_matching_mode(self, provider_with_config):
+        p = provider_with_config(
+            recall_sync=True,
+            recall_tags=["profile", "briefing"],
+        )
+        captured = {}
+
+        async def _arecall(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(results=[])
+
+        p._client.arecall = AsyncMock(side_effect=_arecall)
+
+        assert p.prefetch("current turn") == ""
+        assert captured["tags"] == ["profile", "briefing"]
+        assert captured["tags_match"] == "any"
+        p._client.arecall.assert_awaited_once()
 
     def test_recall_sync_recalls_current_query_synchronously(self, provider_with_config):
         # recall_sync=True: prefetch() must do a live recall against the

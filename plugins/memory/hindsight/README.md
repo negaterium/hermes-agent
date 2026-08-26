@@ -73,8 +73,8 @@ Config file: `~/.hermes/hindsight/config.json`
 | `recall_max_tokens` | `4096` | Maximum tokens for recall results |
 | `recall_max_input_chars` | `800` | Maximum input query length for auto-recall |
 | `recall_prompt_preamble` | — | Custom preamble for recalled memories in context |
-| `recall_tags` | — | Tags to filter when searching memories |
-| `recall_tags_match` | `any` | Tag matching mode: `any` / `all` / `any_strict` / `all_strict` |
+| `recall_tags` | — | Tags to filter when searching memories; used by automatic recall and as the tool default |
+| `recall_tags_match` | `any` | Tag matching mode for recall: `any` / `all` / `any_strict` / `all_strict` |
 | `recall_types` | `observation` | Fact types surfaced by recall (both auto-recall and the `hindsight_recall` tool). Comma-separated string or JSON list. **Default narrowed to `observation` only** (see "Behavior change" below). Set to `observation,world,experience` to also include raw facts. |
 | `auto_recall` | `true` | Automatically recall memories before each turn |
 | `recall_sync` | `false` | Recall synchronously against the *current* message each turn (higher relevance, adds recall latency). Default off: recall runs in the background and is injected on the next turn. |
@@ -130,8 +130,10 @@ Available in `hybrid` and `tools` memory modes:
 | Tool | Description |
 |------|-------------|
 | `hindsight_retain` | Store information with auto entity extraction; supports optional per-call `tags` |
-| `hindsight_recall` | Multi-strategy search (semantic + entity graph) |
+| `hindsight_recall` | Multi-strategy search (semantic + entity graph); supports optional per-call `tags` and `tags_match` filters |
 | `hindsight_reflect` | Cross-memory synthesis (LLM-powered) |
+
+`hindsight_recall` uses `recall_tags` / `recall_tags_match` by default. Supplying `tags` on a call overrides the configured tag list for that request; an empty array clears the configured filter for that request. Supplying `tags_match` selects `any`, `all`, `any_strict`, or `all_strict` for the call without changing provider configuration. Automatic recall continues to use the configured defaults.
 
 ## Environment Variables
 
