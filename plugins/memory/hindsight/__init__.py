@@ -33,8 +33,10 @@ from __future__ import annotations
 import asyncio
 import atexit
 import importlib
+import inspect
 import json
 import logging
+import math
 import os
 import queue
 import sys
@@ -73,7 +75,7 @@ class _RecallResult:
 _DEFAULT_API_URL = "https://api.hindsight.vectorize.io"
 _DEFAULT_LOCAL_URL = "http://localhost:8888"
 # Keep in sync with tools/lazy_deps.py ("memory.hindsight") and plugin.yaml.
-_MIN_CLIENT_VERSION = "0.6.1"
+_MIN_CLIENT_VERSION = "0.9.2"
 _DEFAULT_TIMEOUT = 120  # seconds — cloud API can take 30-40s per request
 _DEFAULT_IDLE_TIMEOUT = 300  # seconds — Hindsight embedded daemon default
 # ``metadata.source`` stamped on retained memories — OPT-IN, empty by default.
@@ -102,6 +104,65 @@ _PROVIDER_DEFAULT_MODELS = {
     "lmstudio": "local-model",
     "openai_compatible": "your-model-name",
 }
+
+
+_VALID_RECALL_SCORE_KEYS = {"semantic", "keyword", "reranker", "final"}
+_BOUNDED_RECALL_SCORE_KEYS = {"semantic", "reranker"}
+
+
+def _parse_bool_setting(value: Any, default: bool) -> bool:
+    """Parse a boolean config value without treating non-empty strings as true."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _normalize_recall_min_scores(value: Any) -> dict[str, float] | None:
+    """Return validated Hindsight recall score floors from config.
+
+    Invalid or unknown values are ignored rather than sent to the server, so a
+    typo cannot silently turn a configured quality guard into an unbounded
+    request. A configured-but-empty mapping is represented as ``None``.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            logger.warning("Invalid Hindsight recall_min_scores JSON; ignoring it")
+            return None
+    if not isinstance(value, dict):
+        logger.warning("Invalid Hindsight recall_min_scores value; expected an object")
+        return None
+
+    normalized: dict[str, float] = {}
+    for raw_key, raw_score in value.items():
+        key = str(raw_key).strip()
+        if key not in _VALID_RECALL_SCORE_KEYS:
+            logger.warning("Ignoring unknown Hindsight recall score floor %r", key)
+            continue
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            logger.warning("Ignoring non-numeric Hindsight recall score floor %r", raw_score)
+            continue
+        if not math.isfinite(score) or score < 0:
+            logger.warning("Ignoring invalid Hindsight recall score floor %r", raw_score)
+            continue
+        if key in _BOUNDED_RECALL_SCORE_KEYS and score > 1:
+            logger.warning("Ignoring out-of-range Hindsight %s score floor %r", key, raw_score)
+            continue
+        normalized[key] = score
+    return normalized or None
 
 
 def _parse_int_setting(value: Any, default: int) -> int:
@@ -879,6 +940,10 @@ class HindsightMemoryProvider(MemoryProvider):
         self._recall_types: list[str] = ["observation"]
         self._recall_prompt_preamble = ""
         self._recall_max_input_chars = 800
+        # Hindsight server-side quality controls. The score floors are opt-in
+        # because reranker scores are not calibrated across unrelated queries.
+        self._recall_min_scores: dict[str, float] | None = None
+        self._recall_prefer_observations = True
 
         # Bank
         self._bank_mission = ""
@@ -983,7 +1048,7 @@ class HindsightMemoryProvider(MemoryProvider):
         env_writes: dict = {}
 
         # Step 2: Install/upgrade deps for selected mode
-        cloud_dep = f"hindsight-client>={_MIN_CLIENT_VERSION}"
+        cloud_dep = f"hindsight-client=={_MIN_CLIENT_VERSION}"
         local_dep = "hindsight-all"
         if mode == "local_embedded":
             deps_to_install = [local_dep]
@@ -1213,6 +1278,8 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "recall_tags", "description": "Tags to filter when searching memories (comma-separated)", "default": ""},
             {"key": "recall_tags_match", "description": "Tag matching mode for recall", "default": "any", "choices": ["any", "all", "any_strict", "all_strict"]},
             {"key": "recall_types", "description": "Fact types to surface on recall — applies to both auto-recall and the hindsight_recall tool (comma-separated or list). Defaults to observation-only — observations are Hindsight's consolidated, deduplicated, evidence-grounded knowledge layer; raw world/experience facts are the supporting evidence observations already summarize. Set to e.g. 'observation,world,experience' to also include raw facts.", "default": "observation"},
+            {"key": "recall_prefer_observations", "description": "When observations and raw facts are both requested, prefer consolidated observations and suppress their source facts", "default": True},
+            {"key": "recall_min_scores", "description": "Optional Hindsight score floors as an object, e.g. {\"reranker\": 0.05}. Use cautiously because scores are not calibrated across queries", "default": {}},
             {"key": "auto_recall", "description": "Automatically recall memories before each turn", "default": True},
             {"key": "recall_sync", "description": "Recall synchronously against the current message before each turn (higher relevance, adds recall latency to the turn). Default off: recall runs in the background and is injected on the next turn.", "default": False},
             {"key": "recall_indicator", "description": "Show a '👁️ Hindsight — recalled N memories' status line when auto-recall injects memory (turn off for customer-facing agents)", "default": True},
@@ -1607,19 +1674,19 @@ class HindsightMemoryProvider(MemoryProvider):
             from packaging.version import Version
             installed = pkg_version("hindsight-client")
             if Version(installed) < Version(_MIN_CLIENT_VERSION):
-                logger.warning("hindsight-client %s is outdated (need >=%s), attempting upgrade...",
+                logger.warning("hindsight-client %s is outdated (need ==%s), attempting upgrade...",
                                installed, _MIN_CLIENT_VERSION)
                 # Environment-aware install: sealed hosted venvs redirect to the
                 # durable data-volume target instead of /opt/hermes (NS-605).
                 from tools.lazy_deps import install_specs
-                outcome = install_specs([f"hindsight-client>={_MIN_CLIENT_VERSION}"], timeout=120)
+                outcome = install_specs([f"hindsight-client=={_MIN_CLIENT_VERSION}"], timeout=120)
                 if outcome.ok:
-                    logger.info("hindsight-client upgraded to >=%s", _MIN_CLIENT_VERSION)
+                    logger.info("hindsight-client upgraded to ==%s", _MIN_CLIENT_VERSION)
                 elif outcome.blocked:
-                    logger.warning("Auto-upgrade unavailable: %s. Run: uv pip install 'hindsight-client>=%s'",
+                    logger.warning("Auto-upgrade unavailable: %s. Run: uv pip install 'hindsight-client==%s'",
                                    outcome.reason, _MIN_CLIENT_VERSION)
                 else:
-                    logger.warning("Auto-upgrade failed: %s. Run: uv pip install 'hindsight-client>=%s'",
+                    logger.warning("Auto-upgrade failed: %s. Run: uv pip install 'hindsight-client==%s'",
                                    (outcome.stderr or "").strip() or "install error", _MIN_CLIENT_VERSION)
         except Exception:
             pass  # packaging not available or other issue — proceed anyway
@@ -1735,6 +1802,12 @@ class HindsightMemoryProvider(MemoryProvider):
             self._recall_types = [t.strip() for t in configured_types.split(",") if t.strip()]
         else:
             self._recall_types = list(configured_types) or ["observation"]
+        self._recall_min_scores = _normalize_recall_min_scores(
+            self._config.get("recall_min_scores")
+        )
+        self._recall_prefer_observations = _parse_bool_setting(
+            self._config.get("recall_prefer_observations"), True
+        )
         self._recall_prompt_preamble = self._config.get("recall_prompt_preamble", "")
         # On-by-default deterministic indicator: when auto-recall injects memory,
         # Hermes emits a "👁️ Hindsight — recalled N memories" status line so the
@@ -1890,6 +1963,56 @@ class HindsightMemoryProvider(MemoryProvider):
             return ""
         return decision.content
 
+    @staticmethod
+    def _client_supports_arecall_parameter(client: Any, parameter: str) -> bool:
+        """Return whether the installed client can send a recall parameter."""
+        try:
+            signature = inspect.signature(client.arecall)
+        except (AttributeError, TypeError, ValueError):
+            return False
+        parameters = signature.parameters.values()
+        return parameter in signature.parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters
+        )
+
+    def _build_recall_kwargs(self, query: str, client: Any) -> dict[str, Any]:
+        """Build one quality-aware recall request for both recall call paths."""
+        recall_kwargs: dict[str, Any] = {
+            "bank_id": self._bank_id,
+            "query": query,
+            "budget": self._budget,
+            "max_tokens": self._recall_max_tokens,
+        }
+        if self._recall_tags:
+            recall_kwargs["tags"] = self._recall_tags
+            recall_kwargs["tags_match"] = self._recall_tags_match
+        if self._recall_types:
+            recall_kwargs["types"] = self._recall_types
+
+        has_observations = "observation" in (self._recall_types or [])
+        has_raw_facts = bool(
+            set(self._recall_types or ()) & {"world", "experience"}
+        )
+        supports_preference = self._client_supports_arecall_parameter(
+            client, "prefer_observations"
+        )
+        if self._recall_prefer_observations and has_observations and has_raw_facts:
+            if not supports_preference:
+                raise RuntimeError(
+                    "Hindsight client does not support prefer_observations; "
+                    "refusing mixed raw/observation recall"
+                )
+            recall_kwargs["prefer_observations"] = True
+
+        if self._recall_min_scores:
+            if not self._client_supports_arecall_parameter(client, "min_scores"):
+                raise RuntimeError(
+                    "Hindsight client does not support min_scores; refusing "
+                    "unfiltered recall while recall_min_scores is configured"
+                )
+            recall_kwargs["min_scores"] = dict(self._recall_min_scores)
+        return recall_kwargs
+
     def _do_recall(self, query: str) -> _RecallResult:
         """Run one recall/reflect for *query*.
 
@@ -1911,18 +2034,13 @@ class HindsightMemoryProvider(MemoryProvider):
                     self._safe_recalled_text(resp.text or "", "reflect result"),
                     0,
                 )
-            recall_kwargs: dict = {
-                "bank_id": self._bank_id, "query": query,
-                "budget": self._budget, "max_tokens": self._recall_max_tokens,
-            }
-            if self._recall_tags:
-                recall_kwargs["tags"] = self._recall_tags
-                recall_kwargs["tags_match"] = self._recall_tags_match
-            if self._recall_types:
-                recall_kwargs["types"] = self._recall_types
             logger.debug("Recall: calling recall (bank=%s, query_len=%d, budget=%s)",
                          self._bank_id, len(query), self._budget)
-            resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
+            resp = self._run_hindsight_operation(
+                lambda client: client.arecall(
+                    **self._build_recall_kwargs(query, client)
+                )
+            )
             safe_results = []
             for result in resp.results or []:
                 if not result.text:
@@ -2274,18 +2392,13 @@ class HindsightMemoryProvider(MemoryProvider):
             if not query:
                 return tool_error("Missing required parameter: query")
             try:
-                recall_kwargs: dict = {
-                    "bank_id": self._bank_id, "query": query, "budget": self._budget,
-                    "max_tokens": self._recall_max_tokens,
-                }
-                if self._recall_tags:
-                    recall_kwargs["tags"] = self._recall_tags
-                    recall_kwargs["tags_match"] = self._recall_tags_match
-                if self._recall_types:
-                    recall_kwargs["types"] = self._recall_types
                 logger.debug("Tool hindsight_recall: bank=%s, query_len=%d, budget=%s",
                              self._bank_id, len(query), self._budget)
-                resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
+                resp = self._run_hindsight_operation(
+                    lambda client: client.arecall(
+                        **self._build_recall_kwargs(query, client)
+                    )
+                )
                 safe_results = []
                 for result in resp.results or []:
                     if not result.text:
@@ -2315,8 +2428,9 @@ class HindsightMemoryProvider(MemoryProvider):
                         bank_id=self._bank_id, query=query, budget=self._budget
                     )
                 )
-                logger.debug("Tool hindsight_reflect: response_len=%d", len(resp.text or ""))
-                return json.dumps({"result": resp.text or "No relevant memories found."})
+                safe_text = self._safe_recalled_text(resp.text or "", "reflect result")
+                logger.debug("Tool hindsight_reflect: response_len=%d", len(safe_text))
+                return json.dumps({"result": safe_text or "No relevant memories found."})
             except Exception as e:
                 logger.warning("hindsight_reflect failed: %s", e, exc_info=True)
                 return tool_error(f"Failed to reflect: {e}")

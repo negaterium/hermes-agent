@@ -28,6 +28,7 @@ from plugins.memory.hindsight import (
     _load_config,
     _load_simple_env,
     _build_embedded_profile_env,
+    _MIN_CLIENT_VERSION,
     _normalize_observation_scopes,
     _normalize_retain_tags,
     _resolve_bank_id_template,
@@ -277,6 +278,14 @@ class TestConfig:
         """Auto-recall must filter to observation by default."""
         assert provider._recall_types == ["observation"]
 
+    def test_recall_quality_controls_config(self, provider_with_config):
+        p = provider_with_config(
+            recall_min_scores={"reranker": 0.05, "final": 0.0001},
+            recall_prefer_observations=True,
+        )
+        assert p._recall_min_scores == {"reranker": 0.05, "final": 0.0001}
+        assert p._recall_prefer_observations is True
+
 
     def test_observation_scopes_keyword_config(self, provider_with_config):
         p = provider_with_config(observation_scopes="per_tag")
@@ -508,6 +517,27 @@ class TestToolHandlers:
         assert "Memory 1" in result["result"]
         assert "Memory 2" in result["result"]
 
+    def test_recall_passes_quality_controls_to_supported_client(self, provider_with_config):
+        p = provider_with_config(
+            recall_types=["observation", "world"],
+            recall_min_scores={"reranker": 0.05, "final": 0.0001},
+            recall_prefer_observations=True,
+        )
+        captured = {}
+
+        async def _arecall(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(results=[])
+
+        p._client.arecall = _arecall
+        result = json.loads(p.handle_tool_call(
+            "hindsight_recall", {"query": "project decision"}
+        ))
+
+        assert result["result"] == "No relevant memories found."
+        assert captured["types"] == ["observation", "world"]
+        assert captured["prefer_observations"] is True
+        assert captured["min_scores"] == {"reranker": 0.05, "final": 0.0001}
 
     def test_reflect_success(self, provider):
         result = json.loads(provider.handle_tool_call(
@@ -515,6 +545,20 @@ class TestToolHandlers:
         ))
         assert result["result"] == "Synthesized answer"
 
+    def test_reflect_result_is_sanitized_before_return(self, provider):
+        token = "hsk" + "-test-" + "a" * 32
+        provider._client.areflect = AsyncMock(
+            return_value=SimpleNamespace(
+                text=f"The retained value is HINDSIGHT_API_KEY={token}"
+            )
+        )
+
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_reflect", {"query": "summarize"}
+        ))
+
+        assert token not in result["result"]
+        assert "[REDACTED SECRET]" in result["result"]
 
     def test_unknown_tool(self, provider):
         result = json.loads(provider.handle_tool_call(
@@ -1626,7 +1670,7 @@ class TestClientAutoUpgradeRoutesThroughLazyDeps:
         calls = self._init_with_outdated_client(
             tmp_path, monkeypatch, InstallSpecsResult(ok=True)
         )
-        assert calls == [(f"hindsight-client>={_MIN_CLIENT_VERSION}",)]
+        assert calls == [(f"hindsight-client=={_MIN_CLIENT_VERSION}",)]
 
     def test_blocked_upgrade_is_nonfatal_and_surfaces_reason(
         self, tmp_path, monkeypatch, caplog
