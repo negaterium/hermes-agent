@@ -1,7 +1,10 @@
 FROM ubuntu:24.04
 
+# node-pty@1.1.0 has no Linux/Node 22 prebuild in every registry mirror;
+# keep the node-gyp fallback reproducible in the image build.
 RUN apt-get update && apt-get install -y \
     curl git gh bash ca-certificates gnupg ripgrep ffmpeg tini rclone \
+    build-essential \
     libvulkan-dev glslang-tools \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
