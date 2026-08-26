@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export HERMES_HOME="${HERMES_HOME:-/root/.hermes}"
+
 VAULT="${VAULT:-/root/obsidian-vault}"
 QMD_COLLECTION_NAME="${QMD_COLLECTION_NAME:-obsidian}"
-QMD_LOG_DIR="${QMD_LOG_DIR:-/root/.hermes/logs}"
+QMD_LOG_DIR="${QMD_LOG_DIR:-$HERMES_HOME/logs}"
 QMD_LOG_FILE="${QMD_LOG_FILE:-$QMD_LOG_DIR/qmd-embed.log}"
-QMD_DATA_DIR="${QMD_DATA_DIR:-/root/.hermes/qmd}"
-OBS_SYNC_SCRIPT_SRC="/app/scripts/obsidian_sync.py"
-OBS_SYNC_SCRIPT_DST="/root/.hermes/scripts/obsidian_sync.py"
+QMD_DATA_DIR="${QMD_DATA_DIR:-$HERMES_HOME/qmd}"
+OBS_SYNC_SCRIPT_SRC="${OBS_SYNC_SCRIPT_SRC:-/app/scripts/obsidian_sync.py}"
+OBS_SYNC_SCRIPT_DST="${OBS_SYNC_SCRIPT_DST:-$HERMES_HOME/scripts/obsidian_sync.py}"
 
 # agent-browser does not discover the Playwright headless-shell layout by
 # itself.  Resolve the baked image binary and pass it explicitly.  Honour a
@@ -51,4 +53,15 @@ else
   fi
 fi
 
-exec hermes gateway run
+HERMES_BOOTSTRAP_PYTHON="${HERMES_BOOTSTRAP_PYTHON:-/app/venv/bin/python3}"
+HERMES_ENV_BOOTSTRAP="${HERMES_ENV_BOOTSTRAP:-/app/scripts/exec_with_hermes_env.py}"
+if [ ! -x "$HERMES_BOOTSTRAP_PYTHON" ]; then
+  echo "[darkserver-start] ERROR: Hermes bootstrap Python not found: $HERMES_BOOTSTRAP_PYTHON" >&2
+  exit 1
+fi
+if [ ! -f "$HERMES_ENV_BOOTSTRAP" ]; then
+  echo "[darkserver-start] ERROR: Hermes environment bootstrap not found: $HERMES_ENV_BOOTSTRAP" >&2
+  exit 1
+fi
+
+exec "$HERMES_BOOTSTRAP_PYTHON" "$HERMES_ENV_BOOTSTRAP" hermes gateway run
