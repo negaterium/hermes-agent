@@ -73,6 +73,13 @@ def test_darkserver_image_has_native_node_build_toolchain():
     assert "build-essential" in dockerfile
 
 
+def test_darkserver_image_bakes_hindsight_client_pin():
+    """The sealed DarkServer image must carry the active Hindsight client pin."""
+    dockerfile = (REPO_ROOT / "Dockerfile.darkserver").read_text(encoding="utf-8")
+
+    assert "uv pip install hindsight-client==0.9.2" in dockerfile
+
+
 # Minimum non-vulnerable Starlette: CVE-2026-48710 ("BadHost") was fixed in
 # 1.0.1. Anything below that lets a malformed Host header desync
 # ``request.url.path`` from the dispatched ASGI path, bypassing path-based

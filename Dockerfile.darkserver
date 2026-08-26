@@ -85,9 +85,13 @@ fs.writeFileSync(f, patched);
 console.log(`QMD llm.js patched for CPU prebuilt mode at ${f}.`);
 EOF
 
+# Hindsight is enabled in the DarkServer deployment but intentionally stays
+# out of the portable [all] extra; bake its reviewed pin into this image so
+# sealed runtime environments do not depend on lazy installation.
 RUN uv venv venv --python 3.11 \
     && export VIRTUAL_ENV=/app/venv \
     && uv pip install -e ".[all]" \
+    && uv pip install hindsight-client==0.9.2 \
     && uv pip install google-api-python-client google-auth-oauthlib google-auth-httplib2 garminconnect \
     && if [ -f "./tinker-atropos/pyproject.toml" ]; then uv pip install -e "./tinker-atropos"; fi
 
