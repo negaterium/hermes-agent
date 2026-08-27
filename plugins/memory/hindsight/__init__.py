@@ -48,7 +48,10 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from agent.secret_scope import get_secret
-from agent.durable_memory_guard import guard_durable_memory_content
+from agent.durable_memory_guard import (
+    MAX_DURABLE_MEMORY_CHARS,
+    guard_durable_memory_content,
+)
 
 from agent.memory_provider import MemoryProvider, RecallStatus
 from hermes_constants import get_hermes_home
@@ -110,6 +113,8 @@ _VALID_RECALL_SCORE_KEYS = {"semantic", "keyword", "reranker", "final"}
 _BOUNDED_RECALL_SCORE_KEYS = {"semantic", "reranker"}
 _VALID_RECALL_TAG_MATCHES = ("any", "all", "any_strict", "all_strict")
 _RECALL_OVERRIDE_UNSET = object()
+_DEFAULT_SHADOW_PROMOTION_MAX_CHARS = 8_000
+_SHADOW_PROMOTION_TAGS = ("shadow-candidate", "promotion-pending-review")
 
 
 def _parse_bool_setting(value: Any, default: bool) -> bool:
@@ -841,6 +846,69 @@ def _resolve_bank_id_template(template: str, fallback: str, **placeholders: str)
     return rendered or fallback
 
 
+def _build_shadow_promotion_content(
+    messages: Any,
+    *,
+    max_chars: int,
+) -> tuple[str | None, int, str]:
+    """Build a bounded, non-model-selected session candidate.
+
+    Only plain user/assistant text is copied. Tool/system messages, transient
+    payloads, and prompt-injection-bearing messages are never sent to the
+    candidate bank. The returned JSON is still a review candidate, not trusted
+    semantic memory.
+    """
+    if not isinstance(messages, list):
+        return None, 0, "invalid session message list"
+    if max_chars <= 0:
+        return None, 0, "candidate size limit is disabled"
+
+    try:
+        from tools.threat_patterns import scan_for_threats
+    except Exception:
+        return None, 0, "threat scanner unavailable"
+
+    eligible: list[dict[str, str]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+
+        decision = guard_durable_memory_content(
+            content,
+            context="shadow promotion candidate",
+        )
+        if decision.blocked_reason:
+            continue
+        safe_content = decision.content.strip()
+        if not safe_content:
+            continue
+        try:
+            findings = scan_for_threats(safe_content, scope="strict")
+        except Exception:
+            return None, 0, "threat scanner failed"
+        if findings:
+            return None, 0, "prompt-injection pattern detected"
+        eligible.append({"role": role, "content": safe_content})
+
+    if not eligible:
+        return None, 0, "no eligible conversation messages"
+
+    candidate = json.dumps(
+        eligible,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    if len(candidate) > max_chars:
+        return None, 0, "candidate exceeds configured size limit"
+    return candidate, len(eligible), ""
+
+
 # ---------------------------------------------------------------------------
 # MemoryProvider implementation
 # ---------------------------------------------------------------------------
@@ -985,6 +1053,11 @@ class HindsightMemoryProvider(MemoryProvider):
         self._bank_mission = ""
         self._bank_retain_mission: str | None = None
         self._bank_id_template = ""
+        # End-of-session candidate promotion is deliberately opt-in and must
+        # target a separately configured bank. It never changes recall mode.
+        self._shadow_promotion_enabled = False
+        self._shadow_promotion_bank_id = ""
+        self._shadow_promotion_max_chars = _DEFAULT_SHADOW_PROMOTION_MAX_CHARS
 
     @property
     def name(self) -> str:
@@ -1301,6 +1374,9 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "llm_model", "description": "LLM model", "default": "gpt-4o-mini", "default_from": {"field": "llm_provider", "map": _PROVIDER_DEFAULT_MODELS}, "when": {"mode": "local_embedded"}},
             {"key": "bank_id", "description": "Memory bank name (static fallback when bank_id_template is unset)", "default": "hermes"},
             {"key": "bank_id_template", "description": "Optional template to derive bank_id dynamically. Placeholders: {profile}, {workspace}, {platform}, {user}, {session}. Example: hermes-{profile}", "default": ""},
+            {"key": "shadow_promotion_enabled", "description": "Queue guarded end-of-session candidates for manual review in a separate bank (default off; does not enable recall)", "default": False},
+            {"key": "shadow_promotion_bank_id", "description": "Required isolated Hindsight bank for shadow candidates; must differ from the active bank", "default": ""},
+            {"key": "shadow_promotion_max_chars", "description": "Maximum serialized candidate size for shadow promotion", "default": _DEFAULT_SHADOW_PROMOTION_MAX_CHARS},
             {"key": "bank_mission", "description": "Mission/purpose description for the memory bank"},
             {"key": "bank_retain_mission", "description": "Custom extraction prompt for memory retention"},
             {"key": "recall_budget", "description": "Recall thoroughness", "default": "mid", "choices": ["low", "mid", "high"]},
@@ -1782,6 +1858,30 @@ class HindsightMemoryProvider(MemoryProvider):
             platform=self._platform,
             user=self._user_id,
             session=self._session_id,
+        )
+        shadow_config = self._config.get("shadow_promotion")
+        if not isinstance(shadow_config, dict):
+            shadow_config = {}
+        shadow_enabled = (
+            self._config["shadow_promotion_enabled"]
+            if "shadow_promotion_enabled" in self._config
+            else shadow_config.get("enabled")
+        )
+        shadow_bank = (
+            self._config["shadow_promotion_bank_id"]
+            if "shadow_promotion_bank_id" in self._config
+            else shadow_config.get("bank_id", "")
+        )
+        shadow_max_chars = (
+            self._config["shadow_promotion_max_chars"]
+            if "shadow_promotion_max_chars" in self._config
+            else shadow_config.get("max_chars", _DEFAULT_SHADOW_PROMOTION_MAX_CHARS)
+        )
+        self._shadow_promotion_enabled = _parse_bool_setting(shadow_enabled, False)
+        self._shadow_promotion_bank_id = _sanitize_bank_segment(str(shadow_bank or "").strip())
+        self._shadow_promotion_max_chars = min(
+            MAX_DURABLE_MEMORY_CHARS,
+            max(0, _parse_int_setting(shadow_max_chars, _DEFAULT_SHADOW_PROMOTION_MAX_CHARS)),
         )
         budget = self._config.get("recall_budget") or self._config.get("budget") or banks.get("budget", "mid")
         self._budget = budget if budget in _VALID_BUDGETS else "mid"
@@ -2506,6 +2606,96 @@ class HindsightMemoryProvider(MemoryProvider):
                 return tool_error(f"Failed to reflect: {e}")
 
         return tool_error(f"Unknown tool: {tool_name}")
+
+    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+        """Queue a guarded session candidate into an isolated review bank.
+
+        This hook is intentionally inert unless explicitly enabled with a
+        distinct candidate bank. Dispatch is asynchronous and captures all
+        source metadata before the manager rotates the provider to a new
+        session. Candidate writes are never recalled automatically.
+        """
+        if not self._shadow_promotion_enabled:
+            return
+        if self._shutting_down.is_set():
+            logger.debug("Hindsight shadow promotion skipped (shutting down)")
+            return
+        if not self._session_id:
+            logger.warning("Hindsight shadow promotion skipped: source session is unavailable")
+            return
+
+        bank_id = self._shadow_promotion_bank_id
+        if not bank_id:
+            logger.warning(
+                "Hindsight shadow promotion skipped: explicit candidate bank is required"
+            )
+            return
+        if bank_id == self._bank_id:
+            logger.warning(
+                "Hindsight shadow promotion skipped: candidate bank must differ from active bank"
+            )
+            return
+
+        candidate, message_count, reason = _build_shadow_promotion_content(
+            messages,
+            max_chars=self._shadow_promotion_max_chars,
+        )
+        if not candidate:
+            logger.info("Hindsight shadow promotion skipped: %s", reason)
+            return
+
+        session_segment = _sanitize_bank_segment(self._session_id) or "unknown"
+        source_document_segment = (
+            _sanitize_bank_segment(self._document_id) or session_segment
+        )
+        candidate_document_id = f"shadow-{source_document_segment}"
+        metadata = {
+            "candidate_only": "true",
+            "candidate_status": "pending_review",
+            "promotion_policy": "manual_only",
+            "source_ref": f"hermes-session:{session_segment}",
+            "source_session_id": session_segment,
+            "source_document_id": source_document_segment,
+            "message_count": str(message_count),
+            "retained_at": _utc_timestamp(),
+        }
+        item = {
+            "content": candidate,
+            "context": "Hermes session candidate awaiting manual review",
+            "metadata": metadata,
+            "timestamp": _event_timestamp(),
+            "tags": list(_SHADOW_PROMOTION_TAGS),
+        }
+        retain_async = bool(self._retain_async)
+
+        def _do_shadow_retain() -> None:
+            try:
+                self._run_hindsight_operation(
+                    lambda client: client.aretain_batch(
+                        bank_id=bank_id,
+                        items=[item],
+                        document_id=candidate_document_id,
+                        retain_async=retain_async,
+                    )
+                )
+            except Exception as exc:
+                # Do not log exception text: provider errors can echo request
+                # details or credentials. The writer remains alive and the
+                # primary Hermes session continues normally.
+                logger.warning(
+                    "Hindsight shadow promotion failed: %s",
+                    type(exc).__name__,
+                )
+
+        try:
+            self._ensure_writer()
+            self._register_atexit()
+            self._retain_queue.put(_do_shadow_retain)
+        except Exception as exc:
+            logger.warning(
+                "Hindsight shadow promotion dispatch failed: %s",
+                type(exc).__name__,
+            )
 
     def on_session_switch(
         self,
