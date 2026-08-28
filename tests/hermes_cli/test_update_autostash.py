@@ -67,6 +67,9 @@ def _setup_update_mocks(monkeypatch, tmp_path):
     monkeypatch.setattr(hermes_config, "migrate_config", lambda **kw: {"env_added": [], "config_added": []})
     monkeypatch.setattr(hermes_main, "_upgrade_pip_before_lazy_refresh", lambda *a, **kw: None)
     monkeypatch.setattr(hermes_main, "_refresh_active_lazy_features", lambda *a, **kw: True)
+    # The production purge evicts the mocked gateway module after the
+    # simulated pull, which would expose the live gateway to this test.
+    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda: None)
     import hermes_cli.gateway as gateway
     monkeypatch.setattr(gateway, "find_gateway_pids", lambda *a, **k: [])
     monkeypatch.setattr(gateway, "_get_service_pids", lambda: set())

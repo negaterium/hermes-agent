@@ -27,6 +27,11 @@ def _isolate_update_gateway(monkeypatch):
     monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
     monkeypatch.setattr(gateway, "find_profile_gateway_processes", lambda *a, **k: [])
     monkeypatch.setattr("hermes_cli.update_cmd.os.kill", lambda *a, **k: None)
+    # Preserve the gateway isolation patches after the simulated pull. The
+    # production purge intentionally evicts cached Hermes modules.
+    monkeypatch.setattr(
+        "hermes_cli.main._purge_stale_hermes_modules", lambda: None
+    )
 
 
 def _make_run_side_effect(
