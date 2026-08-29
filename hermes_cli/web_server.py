@@ -10047,27 +10047,39 @@ async def start_whatsapp_onboarding(body: WhatsAppOnboardingStart):
         session_path = _whatsapp_session_path()
         expires_at_ts = time.time() + _WHATSAPP_ONBOARDING_TTL_SECONDS
         expires_at = _utc_iso_from_ts(expires_at_ts)
-        if (session_path / "creds.json").exists():
-            pairing_id = secrets.token_urlsafe(16)
+        creds_path = session_path / "creds.json"
+        if creds_path.is_file():
             account_id, account_name, account_phone = _whatsapp_linked_account_from_session(session_path)
-            record = _WhatsAppOnboardingSession(
-                proc=None,
-                mode=mode,
-                allowed_users=allowed_users,
-                session_path=str(session_path),
-                expires_at=expires_at,
-                expires_at_ts=expires_at_ts,
-                profile=effective_profile,
-                status="connected",
-                account_id=account_id,
-                account_name=account_name,
-                account_phone=account_phone,
-            )
-            with _whatsapp_onboarding_lock:
-                _prune_whatsapp_onboarding_sessions()
-                _supersede_whatsapp_onboarding_sessions(session_path)
-                _whatsapp_onboarding_sessions[pairing_id] = record
-            return _whatsapp_onboarding_payload(pairing_id, record)
+            if account_id:
+                pairing_id = secrets.token_urlsafe(16)
+                record = _WhatsAppOnboardingSession(
+                    proc=None,
+                    mode=mode,
+                    allowed_users=allowed_users,
+                    session_path=str(session_path),
+                    expires_at=expires_at,
+                    expires_at_ts=expires_at_ts,
+                    profile=effective_profile,
+                    status="connected",
+                    account_id=account_id,
+                    account_name=account_name,
+                    account_phone=account_phone,
+                )
+                with _whatsapp_onboarding_lock:
+                    _prune_whatsapp_onboarding_sessions()
+                    _supersede_whatsapp_onboarding_sessions(session_path)
+                    _whatsapp_onboarding_sessions[pairing_id] = record
+                return _whatsapp_onboarding_payload(pairing_id, record)
+
+            # Baileys may leave an empty or partial creds.json after a bridge
+            # timeout. It is not evidence of a linked account, and leaving it
+            # in place can make the next auth-state load fail before a QR is
+            # emitted. Remove only this unusable marker; the pairing process
+            # will regenerate the auth state in the same session directory.
+            try:
+                creds_path.unlink()
+            except OSError as exc:
+                _log.warning("Could not remove unusable WhatsApp credentials: %s", exc)
 
     pairing_id = secrets.token_urlsafe(16)
     record = _WhatsAppOnboardingSession(
