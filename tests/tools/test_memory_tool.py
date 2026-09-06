@@ -142,6 +142,20 @@ class TestMemoryStoreAdd:
         assert result["success"] is False
         assert "Blocked" in result["error"]
 
+    def test_add_secret_is_scrubbed_before_persistence(self, store):
+        token = "sk-test-abcdefghijklmnopqrstuvwxyz123456"
+        result = store.add("memory", f"OPENAI_API_KEY={token}")
+
+        assert result["success"] is True
+        assert token not in store.memory_entries[0]
+        assert "[REDACTED SECRET]" in store.memory_entries[0]
+
+    def test_add_transient_tool_output_is_rejected(self, store):
+        result = store.add("memory", "Tool result:\n{\"status\": 200}")
+
+        assert result["success"] is False
+        assert "transient" in result["error"].lower()
+
 
 class TestMemoryStoreReplace:
     def test_replace_entry(self, store):
@@ -396,6 +410,18 @@ class TestMemoryBatch:
         ))
         assert result["success"] is False
         assert "legit fact" not in store.memory_entries
+
+    def test_batch_new_text_secret_is_scrubbed_before_persistence(self, store):
+        token = "ghp_testabcdefghijklmnopqrstuvwxyz123456"
+        result = json.loads(memory_tool(
+            target="memory",
+            operations=[{"action": "add", "new_text": f"GITHUB_TOKEN={token}"}],
+            store=store,
+        ))
+
+        assert result["success"] is True
+        assert token not in store.memory_entries[0]
+        assert "[REDACTED SECRET]" in store.memory_entries[0]
 
 
 # =========================================================================
