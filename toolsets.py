@@ -12,6 +12,8 @@ _HERMES_CORE_TOOLS = [
     "web_search", "web_extract",
     "terminal", "process_manage",
     "read_file", "write_file", "patch", "search_files",
+    # Local knowledge recall
+    "knowledge_search", "knowledge_read",
     "vision_analyze", "image_generate",
     "skills_list", "skill_view", "skill_manage",
     "browser_navigate", "browser_snapshot", "browser_click",
@@ -21,7 +23,7 @@ _HERMES_CORE_TOOLS = [
     "browser_exec",  # replaces the other browser tools when browser.backend is "browser-use"
     "text_to_speech",
     "todo_list", "memory",
-    "session_search",
+    "session_search", "session_list", "session_read",
     "clarify",
     "execute_code", "delegate_task",
     "cronjob_manage",
@@ -119,11 +121,12 @@ TOOLSETS = {
         "search (content + files)",
         ["read_file", "write_file", "patch", "search_files"],
     ),
+    "knowledge": _ts("Local knowledge-base recall tools backed by qmd", ["knowledge_search", "knowledge_read"]),
     "tts": _ts("Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, OpenAI, or xAI", ["text_to_speech"]),
     "todo": _ts("Task planning and tracking for multi-step work", ["todo_list"]),
     "memory": _ts("Persistent memory across sessions (personal notes + user profile)", ["memory"]),
     "context_engine": _ts("Runtime tools exposed by the active context engine"),
-    "session_search": _ts("Search and recall past conversations with summarization", ["session_search"]),
+    "session_search": _ts("Search and recall past conversations with summarization", ["session_search", "session_list", "session_read"]),
     "project": _ts("Desktop Projects — create/switch named workspaces (GUI sessions only)", ["desktop_project"]),
     "bot_room": _ts("Verified text-only Group Chat turn capabilities"),
 

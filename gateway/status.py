@@ -533,13 +533,25 @@ def _file_cache_signature(path: Path) -> tuple[bool, Optional[int], Optional[int
 
 
 def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
-    """Force-unlink a stale PID file + sibling lock (lock confirmed inactive, so no pid check)."""
+    """Delete stale gateway runtime metadata after liveness checks fail.
+
+    Called from ``get_running_pid()`` after the runtime lock has already been
+    confirmed inactive, so the on-disk metadata is known to belong to a dead
+    process. Unlike ``remove_pid_file()`` (which defensively refuses to delete
+    a PID file whose ``pid`` field differs from ``os.getpid()`` to protect
+    ``--replace`` handoffs), this path force-unlinks stale metadata so the next
+    startup sees a clean slate.
+    """
     if not cleanup_stale:
         return
     _clear_running_pid_cache()
     for path in (pid_path, _get_gateway_lock_path(pid_path)):
         with contextlib.suppress(Exception):
             path.unlink(missing_ok=True)
+    # The primary gateway's status record is stale with its PID. A profile- or
+    # alternate-path cleanup must not erase another process's status record.
+    if pid_path == _get_pid_path():
+        _unlink_quietly(_get_runtime_status_path())
 
 
 def _try_acquire_file_lock(handle) -> bool:

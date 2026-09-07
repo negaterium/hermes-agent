@@ -49,6 +49,44 @@ from agent.delegation_context import (
 logger = logging.getLogger(__name__)
 
 
+# Marker for an agent turn that reached its iteration budget before terminal
+# completion. The firing path records this as ``last_status='partial'`` rather
+# than treating a non-empty fallback response as a successful run.
+PARTIAL_RUN_MARKER = "[partial]"
+
+# Marker for an explicit publication refusal. A response whose first non-empty
+# line is ``BLOCKED`` is an operational failure, not a successful publication.
+BLOCKED_RUN_MARKER = "[blocked]"
+
+
+def _is_explicit_blocked_response(response: str) -> bool:
+    """Return whether *response* starts with the cron ``BLOCKED`` status."""
+    first_line = next(
+        (line.strip() for line in str(response or "").splitlines() if line.strip()),
+        "",
+    )
+    return first_line.upper() in {"BLOCKED", "[BLOCKED]"}
+
+
+def _has_cron_error_marker(error: object, marker: str) -> bool:
+    """Recognize a scheduler marker only at the start of the error.
+
+    ``run_job`` wraps raised markers as ``RuntimeError: [marker] ...``. A
+    provider error mentioning ``[partial]`` or ``[blocked]`` in ordinary text
+    must remain an ordinary failure and must not alter its persisted status.
+    """
+    text = str(error or "").strip()
+    if text.startswith(marker):
+        return True
+    separator = text.find(":")
+    if separator <= 0:
+        return False
+    return (
+        text[:separator].strip() == "RuntimeError"
+        and text[separator + 1 :].lstrip().startswith(marker)
+    )
+
+
 def _close_late_session_db_result(future: "concurrent.futures.Future") -> None:
     """Done-callback: close a SessionDB whose constructor finished after run_job's init timeout
     (worker abandoned via ``shutdown(wait=False)``), else its .db/WAL/SHM handles leak to EMFILE.
@@ -1864,10 +1902,10 @@ def _final_response_from_result(result: dict, job_id: str, job_name: str, AIAgen
     if result.get("failed") is True or (result.get("completed") is False and not max_iteration_summary):
         raise RuntimeError(result.get("error") or final_response_text or "agent reported failure")
     if max_iteration_summary:
-        logger.warning(
-            "Job '%s' reached the iteration limit but produced a final fallback response; "
-            "delivering the response instead of failing the cron run",
-            job_name)
+        raise RuntimeError(
+            f"{PARTIAL_RUN_MARKER} Agent reached the iteration limit before "
+            f"terminal completion: {turn_exit_reason}"
+        )
 
     final_response = result.get("final_response", "") or ""
     # Repair model-mangled computer_use media paths before delivery (fail-open, as in gateway).
@@ -2360,9 +2398,16 @@ def run_job(
         # No audit row when we failed before the agent existed; the audit write must never raise.
         if _audit is not None:
             _audit.write({}, error_msg)
+        partial_run = _has_cron_error_marker(error_msg, PARTIAL_RUN_MARKER)
+        display_error = (
+            error_msg.replace(PARTIAL_RUN_MARKER, "", 1).strip()
+            if partial_run
+            else error_msg
+        )
+        status_label = "PARTIAL" if partial_run else "FAILED"
         output = (
-            _run_doc_header(job, f"{job_name} (FAILED)", job_id, prompt)
-            + f"## Error\n\n```\n{error_msg}\n```\n"
+            _run_doc_header(job, f"{job_name} ({status_label})", job_id, prompt)
+            + f"## Error\n\n```\n{display_error}\n```\n"
         )
         return False, output, "", error_msg
 
@@ -2595,19 +2640,32 @@ def _classify_delivery_outcome(
 
 def _compose_run_delivery(
     job: dict, *, success: bool, error, final_response: str, output_file,
-) -> tuple[str, bool, bool, bool, Optional[str]]:
-    """Text to deliver for a finished run. Returns ``(deliver_content, blocked_config,
-    silent_alert, incident_acked, failure_incident_id)``; ``silent_alert``: an alert-once marker
-    says the operator was already told, deliver nothing."""
+) -> tuple[str, bool, bool, bool, Optional[str], bool, bool]:
+    """Text to deliver for a finished run.
+
+    Returns ``(deliver_content, blocked_config, silent_alert, incident_acked,
+    failure_incident_id, blocked_run, partial_run)``. ``silent_alert`` means
+    an alert-once marker says the operator was already told, so delivery is
+    suppressed.
+    """
     err = str(error) if error else ""
     # Failed jobs always deliver, except blocked-config / drift-skip runs, which alert exactly ONCE.
-    blocked_config_silent = BLOCKED_CONFIG_SILENT_MARKER in err
-    blocked_config = blocked_config_silent or BLOCKED_CONFIG_MARKER in err
-    drift_skip_silent = DRIFT_SKIP_SILENT_MARKER in err
-    drift_skip = drift_skip_silent or DRIFT_SKIP_MARKER in err
+    blocked_config_silent = _has_cron_error_marker(err, BLOCKED_CONFIG_SILENT_MARKER)
+    blocked_config = blocked_config_silent or _has_cron_error_marker(err, BLOCKED_CONFIG_MARKER)
+    drift_skip_silent = _has_cron_error_marker(err, DRIFT_SKIP_SILENT_MARKER)
+    drift_skip = drift_skip_silent or _has_cron_error_marker(err, DRIFT_SKIP_MARKER)
+    blocked_run = _has_cron_error_marker(err, BLOCKED_RUN_MARKER)
+    partial_run = _has_cron_error_marker(err, PARTIAL_RUN_MARKER)
     incident_acked = False
     failure_incident_id = None
-    if blocked_config and not success:
+    clean_error = err
+    for marker in (BLOCKED_RUN_MARKER, PARTIAL_RUN_MARKER):
+        if _has_cron_error_marker(clean_error, marker):
+            clean_error = clean_error.replace(marker, "", 1).strip()
+    if blocked_run and not success:
+        # Publication jobs return their own concise, auditable status report.
+        deliver_content = final_response.strip() or clean_error
+    elif blocked_config and not success:
         # Bypass the generic failure summarizer (its auth/timeout heuristics would mislabel this).
         _pf_text = re.sub(r"\[blocked_config[^\]]*\]\s*", "", err).strip()
         deliver_content = (
@@ -2628,7 +2686,7 @@ def _compose_run_delivery(
             deliver_content = ""
         else:
             deliver_content = (
-                _summarize_cron_failure_for_delivery(job, error) + _failure_streak_nudge(job)
+                _summarize_cron_failure_for_delivery(job, clean_error) + _failure_streak_nudge(job)
             )
         if drift_skip:
             # Deliver the guard's message intact (summarizer truncation would eat the remediation
@@ -2637,7 +2695,7 @@ def _compose_run_delivery(
             deliver_content = f"⚠️ Cron '{job.get('name') or job['id']}' skipped: {_drift_text}"
     return (
         deliver_content, blocked_config, blocked_config_silent or drift_skip_silent,
-        incident_acked, failure_incident_id)
+        incident_acked, failure_incident_id, blocked_run, partial_run)
 
 
 class _FireClaimLostDuringSideEffect(Exception):
@@ -2686,6 +2744,8 @@ class _RunDelivery:
     should_deliver: bool = False
     unresolved_origin: bool = False
     blocked_config: bool = False
+    blocked_run: bool = False
+    partial_run: bool = False
     incident_acked: bool = False
     failure_incident_id: Optional[str] = None
     side_effect_ownership_lost: bool = False
@@ -2714,11 +2774,25 @@ def _save_compose_deliver(
             "(tool subprocess was killed mid-flight)."
         )
 
+    if d.success and _is_explicit_blocked_response(final_response):
+        d.success = False
+        d.error = f"{BLOCKED_RUN_MARKER} {final_response.strip()}"
+
     (
-        deliver_content, d.blocked_config, _silent_alert, d.incident_acked, d.failure_incident_id,
+        deliver_content,
+        d.blocked_config,
+        _silent_alert,
+        d.incident_acked,
+        d.failure_incident_id,
+        d.blocked_run,
+        d.partial_run,
     ) = _compose_run_delivery(
         job, success=d.success, error=d.error, final_response=final_response,
         output_file=output_file)
+    if d.partial_run and d.error:
+        d.error = str(d.error).replace(PARTIAL_RUN_MARKER, "", 1).strip()
+    if d.blocked_run and d.error:
+        d.error = str(d.error).replace(BLOCKED_RUN_MARKER, "", 1).strip()
     # Whitespace-only == empty: skip delivery; the guard below marks it a soft failure.
     d.should_deliver = bool(deliver_content.strip()) and not _silent_alert
     # Not a substring check: bare "SILENT"/"NO_REPLY" or a report quoting "[SILENT]" must
@@ -2789,6 +2863,10 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
         mark_kwargs["expected_fire_owner"] = fire_owner
     if d.blocked_config:
         mark_kwargs["status"] = "blocked_config"
+    elif d.blocked_run:
+        mark_kwargs["status"] = "blocked"
+    elif d.partial_run:
+        mark_kwargs["status"] = "partial"
     marked = mark_job_run(job["id"], d.success, d.error, **mark_kwargs)
     if fire_owner is not None and not marked:
         finish_execution(
@@ -3828,6 +3906,7 @@ def tick(
 # ---------------------------------------------------------------------------
 from cron.scheduler_delivery import (  # noqa: E402
     _deliver_result, _delivery_lane_value, _normalize_deliver_value, _resolve_delivery_target,
+    _resolve_origin,
     _resolve_delivery_targets,
 )
 from cron.scheduler_script import (  # noqa: E402

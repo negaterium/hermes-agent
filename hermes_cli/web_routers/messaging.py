@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -44,7 +45,7 @@ _profile_scope = late("_profile_scope", "hermes_cli.web_server_profiles")
 _resolve_profile_dir = late("_resolve_profile_dir", "hermes_cli.web_server_profiles")
 _restart_gateway_after_whatsapp_onboarding = late("_restart_gateway_after_whatsapp_onboarding", "hermes_cli.web_server_messaging")
 _telegram_onboarding_request_sync = late("_telegram_onboarding_request_sync", "hermes_cli.web_server_messaging")
-_whatsapp_session_path = late("_whatsapp_session_path", "hermes_cli.web_server_messaging")
+_whatsapp_session_path = late("_whatsapp_session_path")
 _write_platform_enabled = late("_write_platform_enabled", "hermes_cli.web_server_messaging")
 load_env = late("load_env", "hermes_cli.config")
 load_config = late("load_config", "hermes_cli.config")
@@ -481,6 +482,13 @@ def _run_whatsapp_pairing(pairing_id: str, session_path: Path, mode: str) -> Non
     _watch_whatsapp_pairing(pairing_id, proc)
 
 
+def _run_whatsapp_pairing_compat(*args: Any) -> None:
+    """Honor the pre-split web_server monkeypatch seam when present."""
+    facade = sys.modules.get("hermes_cli.web_server")
+    override = getattr(facade, "__dict__", {}).get("_run_whatsapp_pairing") if facade else None
+    (override or _run_whatsapp_pairing)(*args)
+
+
 def _prune_whatsapp_onboarding_sessions() -> None:
     now = time.time()
     remove_ids: list[str] = []
@@ -536,7 +544,7 @@ async def start_whatsapp_onboarding(body: WhatsAppOnboardingStart):
     record = _WhatsAppOnboardingSession(**fields)
     pairing_id = _register_whatsapp_session(session_path, record)
     if not already_linked:
-        threading.Thread(target=_run_whatsapp_pairing, args=(pairing_id, session_path, mode), daemon=True).start()
+        threading.Thread(target=_run_whatsapp_pairing_compat, args=(pairing_id, session_path, mode), daemon=True).start()
     return _whatsapp_onboarding_payload(pairing_id, record)
 
 

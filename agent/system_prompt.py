@@ -22,7 +22,9 @@ from agent.prompt_builder import (
     HERMES_AGENT_HELP_GUIDANCE, HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS, KANBAN_GUIDANCE, MEMORY_GUIDANCE,
     USER_PROFILE_GUIDANCE, PARALLEL_TOOL_CALL_GUIDANCE, PLATFORM_HINTS, SESSION_SEARCH_GUIDANCE,
     SKILLS_GUIDANCE, STEER_CHANNEL_NOTE, TASK_COMPLETION_GUIDANCE, TELEGRAM_RICH_MESSAGES_HINT,
-    TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, drain_truncation_warnings,
+    TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS,
+    build_google_model_operational_guidance, build_openai_model_execution_guidance, build_platform_hint,
+    drain_truncation_warnings,
 )
 from agent import prompt_builder as _pb
 from agent.runtime_cwd import resolve_context_cwd
@@ -295,7 +297,7 @@ def _tool_guidance_block(agent: Any) -> Optional[str]:
     return " ".join(g for g in tool_guidance if g) or None
 
 
-def _skills_prompt(agent: Any) -> str:
+def _skills_prompt(agent: Any, skill_query: Optional[str] = None) -> str:
     """Skills index (empty without skills tools).  Focus mode demotes non-coding
     categories to names-only — never hidden, every name stays visible."""
     if not any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage']):
@@ -308,7 +310,8 @@ def _skills_prompt(agent: Any) -> str:
     except Exception:
         _compact_cats = frozenset()
     return _pb.build_skills_system_prompt(available_tools=agent.valid_tool_names, available_toolsets=avail_toolsets,
-                                         compact_categories=_compact_cats or None, skills_dir_override=_agent_skills_dir(agent))
+                                         compact_categories=_compact_cats or None, skills_dir_override=_agent_skills_dir(agent),
+                                         query=skill_query)
 
 
 def _bot_mode_parts(agent: Any) -> List[str]:
@@ -384,7 +387,15 @@ def _platform_hint(agent: Any) -> str:
     """Built-in/plugin platform hint + Telegram rich-messages opt-in + config
     override + desktop TUI clarifier."""
     platform_key = (agent.platform or "").lower().strip()
-    _default_hint = PLATFORM_HINTS.get(platform_key, "")
+    if platform_key in PLATFORM_HINTS:
+        _rich_messages = platform_key == "telegram" and _telegram_rich_messages_enabled()
+        if agent.valid_tool_names or _rich_messages:
+            _default_hint = build_platform_hint(platform_key, agent.valid_tool_names)
+        else:
+            # Preserve the upstream base wording when the tool surface is not known yet.
+            _default_hint = PLATFORM_HINTS[platform_key]
+    else:
+        _default_hint = ""
     if not _default_hint and platform_key:
         try:
             from gateway.platform_registry import platform_registry
@@ -515,10 +526,9 @@ def _guidance_parts(agent: Any) -> List[str]:
     if _model_gate(agent._tool_use_enforcement, agent.model, TOOL_USE_ENFORCEMENT_MODELS):
         parts.append(TOOL_USE_ENFORCEMENT_GUIDANCE)
         if any(g in (agent.model or "").lower() for g in ("gemini", "gemma")):
-            parts.append(GOOGLE_MODEL_OPERATIONAL_GUIDANCE)
+            parts.append(build_google_model_operational_guidance(agent.valid_tool_names))
     if _model_gate(getattr(agent, "_execution_guidance", "auto"), agent.model, EXECUTION_GUIDANCE_MODELS):
-        from agent.prompt_builder import execution_guidance_text
-        parts.append(execution_guidance_text(agent.valid_tool_names))
+        parts.append(build_openai_model_execution_guidance(agent.valid_tool_names))
     return parts
 
 
@@ -585,7 +595,11 @@ def _join_tier(parts: List[Optional[str]]) -> str:
     return "\n\n".join(p.strip() for p in parts if p and p.strip())
 
 
-def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) -> Dict[str, str]:
+def build_system_prompt_parts(
+    agent: Any,
+    system_message: Optional[str] = None,
+    skill_query: Optional[str] = None,
+) -> Dict[str, str]:
     """Assemble the system prompt as three ordered cache tiers: ``stable`` (through
     the coding operating brief when a workspace snapshot follows), ``context``
     (snapshot, remaining session-stable guidance, caller ``system_message``,
@@ -602,7 +616,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     _help_guidance_slot = len(stable_parts)
     stable_parts.append(HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS)
     stable_parts.extend(_guidance_parts(agent))
-    skills_prompt = _skills_prompt(agent)
+    skills_prompt = _skills_prompt(agent, skill_query=skill_query)
     # Skill-pointer variant requires BOTH skill_view AND the hermes-agent skill
     # in the rendered index (pure string check — inherits the index's stability).
     if "skill_view" in (agent.valid_tool_names or set()) and "- hermes-agent:" in skills_prompt:
@@ -635,11 +649,19 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     return {"stable": _join_tier(stable_parts), "context": _join_tier(context_parts), "volatile": _join_tier(volatile_parts)}
 
 
-def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str:
+def build_system_prompt(
+    agent: Any,
+    system_message: Optional[str] = None,
+    skill_query: Optional[str] = None,
+) -> str:
     """Assemble the full prompt; cached on ``agent._cached_system_prompt`` and
     only rebuilt after compression.  Tiers are ordered stable -> context ->
     volatile so implicit longest-prefix caches keep the unchanged scaffold."""
-    parts = build_system_prompt_parts(agent, system_message=system_message)
+    parts = build_system_prompt_parts(
+        agent,
+        system_message=system_message,
+        skill_query=skill_query,
+    )
     agent._cached_system_prompt_static = parts["stable"]
     # Surface context-file truncation warnings in chat, not only in logs.
     for warning in drain_truncation_warnings():

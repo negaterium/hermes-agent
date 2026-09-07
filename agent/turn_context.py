@@ -830,7 +830,16 @@ def build_turn_context(
 
     # System prompt is cached per session for prefix caching.
     if agent._cached_system_prompt is None:
-        restore_or_build_system_prompt(agent, system_message, conversation_history)
+        restore_or_build_system_prompt(
+            agent,
+            system_message,
+            conversation_history,
+            skill_query=(
+                original_user_message
+                if isinstance(original_user_message, str)
+                else None
+            ),
+        )
     active_system_prompt = agent._cached_system_prompt
 
     # Bot Mode DM tool — injected ONLY into a bot's canonical "Bot Chat" session (same

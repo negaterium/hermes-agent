@@ -1476,6 +1476,9 @@ import zipfile  # noqa: F401,E402
 
 
 _PLUGIN_COMPAT_LAZY = {
+    '_whatsapp_onboarding_sessions': ('hermes_cli.web_server_messaging', '_whatsapp_onboarding_sessions'),
+    '_whatsapp_session_path': ('hermes_cli.web_server_messaging', '_whatsapp_session_path'),
+    '_run_whatsapp_pairing': ('hermes_cli.web_routers.messaging', '_run_whatsapp_pairing'),
     'AudioTranscriptionRequest': ('hermes_cli.web_models', 'AudioTranscriptionRequest'),
     'AutomationBlueprintInstantiate': ('hermes_cli.web_models', 'AutomationBlueprintInstantiate'),
     'BackupRequest': ('hermes_cli.web_models', 'BackupRequest'),

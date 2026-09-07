@@ -173,7 +173,7 @@ async def test_start_gateway_replace_force_uses_terminate_pid(monkeypatch, tmp_p
     # force-kill reaps the process: terminate_pid(force=True) flips it dead,
     # and the post-kill re-poll via _pid_exists then sees it gone so the
     # replacement proceeds.
-    def _mock_terminate_pid(pid, force=False):
+    def _mock_terminate_pid(pid, force=False, **_kwargs):
         calls.append((pid, force))
         if force:
             _pid_state["alive"] = False

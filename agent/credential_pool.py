@@ -2834,7 +2834,12 @@ def load_pool(provider: str) -> CredentialPool:
             entries[:] = borrowed + others
         else:
             changed |= _prune_stale_seeded_entries(
-                entries, singleton_sources | env_sources, prune_env_sources=False,
+                entries,
+                singleton_sources | env_sources,
+                # Copilot legacy env rows are validated by its dedicated
+                # singleton resolver; once invalid, remove them instead of
+                # preserving a permanently unusable credential.
+                prune_env_sources=provider == "copilot",
             )
         changed |= _normalize_pool_priorities(provider, entries)
 

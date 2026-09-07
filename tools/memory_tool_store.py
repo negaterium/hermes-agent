@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from utils import atomic_write_text
+from agent.durable_memory_guard import guard_durable_memory_content
 from tools.threat_patterns import first_threat_message as _first_threat_message
 
 logger = logging.getLogger("tools.memory_tool")
@@ -213,9 +214,15 @@ class MemoryStore:
 
     def add(self, target: str, content: str) -> Dict[str, Any]:
         """Append a new entry. Returns error if it would exceed the char limit."""
+        if not isinstance(content, str):
+            return _error("Content must be text.")
         content = content.strip()
         if not content:
             return _error("Content cannot be empty.")
+        decision = guard_durable_memory_content(content)
+        if decision.blocked_reason:
+            return _error(f"Rejected for durable memory: {decision.blocked_reason}.")
+        content = decision.content.strip()
         if scan_error := _scan_memory_content(content):
             return _error(scan_error)
 
@@ -235,11 +242,17 @@ class MemoryStore:
 
     def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
         """Find entry containing old_text substring, replace it with new_content."""
+        if not isinstance(new_content, str):
+            return _error("new_content must be text.")
         new_content = new_content.strip()
         if not old_text.strip():
             return _error("old_text cannot be empty.")
         if not new_content:
             return _error("new_content cannot be empty. Use 'remove' to delete entries.")
+        decision = guard_durable_memory_content(new_content)
+        if decision.blocked_reason:
+            return _error(f"Rejected for durable memory: {decision.blocked_reason}.")
+        new_content = decision.content.strip()
         if scan_error := _scan_memory_content(new_content):
             return _error(scan_error)
         return self._edit(target, old_text.strip(), new_content)
@@ -302,12 +315,21 @@ class MemoryStore:
         an over-limit result writes NOTHING and returns the first failure plus live state."""
         if not operations:
             return _error("operations list is empty.")
-        ops = [op or {} for op in operations]
-        # Scan every add/replace content BEFORE touching disk -- one poisoned op rejects the batch.
-        for i, op in enumerate(ops):
-            scan_error = op.get("action") in {"add", "replace"} and op.get("content") and _scan_memory_content(op["content"])
+        ops = []
+        # Scrub/reject every add/replace content BEFORE touching disk -- one unsafe op rejects the batch.
+        for i, raw_op in enumerate(operations):
+            op = dict(raw_op or {})
+            action = op.get("action")
+            raw_content = op.get("content") or op.get("new_text") or ""
+            if action in {"add", "replace"} and isinstance(raw_content, str) and raw_content.strip():
+                decision = guard_durable_memory_content(raw_content)
+                if decision.blocked_reason:
+                    return _error(f"Operation {i + 1}: rejected for durable memory: {decision.blocked_reason}.")
+                op["content"] = decision.content
+            scan_error = action in {"add", "replace"} and op.get("content") and _scan_memory_content(op["content"])
             if scan_error:
                 return _error(f"Operation {i + 1}: {scan_error}")
+            ops.append(op)
 
         def _apply(entries, limit):
             working = list(entries)  # only committed if the whole batch validates
