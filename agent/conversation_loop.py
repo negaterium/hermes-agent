@@ -648,7 +648,12 @@ def _persist_system_prompt(agent, failure_message: str, *, persist_tools: bool =
         logger.warning(failure_message, agent.session_id, exc)
 
 
-def _restore_or_build_system_prompt(agent, system_message, conversation_history):
+def _restore_or_build_system_prompt(
+    agent,
+    system_message,
+    conversation_history,
+    skill_query: str | None = None,
+):
     """Restore the cached system prompt from the session DB or build it fresh.
 
     Mutates ``agent._cached_system_prompt`` and persists a freshly-built prompt on first
@@ -750,7 +755,15 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         )
 
     # First turn of a new session (or recovering from a broken stored prompt).
-    agent._cached_system_prompt = agent._build_system_prompt(system_message)
+    # The query is used only on a build path. Restored prompts remain byte-identical
+    # so continuation turns keep their provider-side cache prefix.
+    if skill_query is None:
+        agent._cached_system_prompt = agent._build_system_prompt(system_message)
+    else:
+        agent._cached_system_prompt = agent._build_system_prompt(
+            system_message,
+            skill_query=skill_query,
+        )
 
     # The rebuilt prompt describes the CURRENT surface, but a surface note left in the
     # transcript by an earlier switch does not — retire it here too, or a rebuild for an

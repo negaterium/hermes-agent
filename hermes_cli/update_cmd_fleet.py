@@ -575,18 +575,27 @@ def _restart_macos_launchd_gateways(
     cannot leave the rest of the fleet on old code (#68523).
     """
     from hermes_cli.gateway import (
-        get_launchd_label, get_launchd_plist_path, launchd_gateway_labels_for_install, _graceful_restart_via_sigusr1, _launchd_kickstart,
+        get_launchd_label, get_launchd_plist_path, launchd_gateway_labels_for_install,
+        _graceful_restart_via_sigusr1, _launchd_kickstart, _launchd_service_registered,
         _locate_launchd_gateway_service, _wait_for_launchd_service_pid,
     )
+    current_label = get_launchd_label()
     if require_supervision:
-        listing = subprocess.run(["launchctl", "list"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
+        listing = subprocess.run(
+            ["launchctl", "list"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=10)
         if listing.returncode != 0:
             failed_or_stale_units.append("launchd (listing failed)")
             return
-    _restarted, _failed = _restart_launchd_gateway_after_update(supervision_verify=True)
+    # A plist can remain on disk after the LaunchAgent was removed from the
+    # current launchd domain. Do not invent a successful restart for that
+    # unregistered profile; sibling services are still handled below.
+    if get_launchd_plist_path().exists() and not _launchd_service_registered(current_label):
+        _restarted, _failed = [], []
+    else:
+        _restarted, _failed = _restart_launchd_gateway_after_update(supervision_verify=True)
     restarted_services.extend(_restarted)
     failed_or_stale_units.extend(_failed)
-    current_label = get_launchd_label()
 
     for label in launchd_gateway_labels_for_install():
         if label == current_label:

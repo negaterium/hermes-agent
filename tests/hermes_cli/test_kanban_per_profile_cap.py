@@ -25,6 +25,9 @@ def isolated_kanban_home_with_profiles(monkeypatch):
         if mod.startswith("hermes_cli") or mod.startswith("hermes_state") or mod == "hermes_constants":
             del sys.modules[mod]
     from hermes_cli import kanban_db
+    # Exercise the explicit per-profile cap without letting the host's real
+    # memory-pressure state replace it with the emergency one-worker limit.
+    monkeypatch.setattr(kanban_db, "_memory_pressure_level", lambda: "unknown")
     yield kanban_db
 
 

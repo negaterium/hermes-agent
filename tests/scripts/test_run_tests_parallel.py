@@ -443,6 +443,46 @@ def test_multiple_absolute_paths_split_on_pathsep(tmp_path: Path) -> None:
     assert "Discovered 2 test files" in proc.stdout, proc.stdout
 
 
+def test_exclude_removes_named_file_from_discovery(tmp_path: Path) -> None:
+    """``--exclude`` omits a file without hiding failures in the rest of the run."""
+    probe_dir = _make_probe_dir(tmp_path)
+    excluded = probe_dir / "test_excluded_probe.py"
+    excluded.write_text(
+        "def test_must_not_run():\n"
+        "    raise AssertionError('excluded probe executed')\n",
+        encoding="utf-8",
+    )
+    repo_root = Path(__file__).resolve().parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--paths",
+            str(probe_dir),
+            "--exclude",
+            str(excluded),
+            "-j",
+            "1",
+            "--file-timeout",
+            "30",
+            "-q",
+        ],
+        cwd=repo_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    assert "Excluded 1 test file" in proc.stdout, proc.stdout
+    assert "Discovered 1 test files" in proc.stdout, proc.stdout
+    assert "excluded probe executed" not in proc.stdout, proc.stdout
+    assert "2 tests passed" in proc.stdout, proc.stdout
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="drive-letter paths")
 def test_drive_letter_colon_is_not_a_path_separator(tmp_path: Path) -> None:
     """An absolute ``--paths`` value stays one root on Windows.
