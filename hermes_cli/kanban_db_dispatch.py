@@ -1689,7 +1689,11 @@ def _tick_spawn_budget(
     # critical -> spawn nothing this tick; elevated -> at most one new worker.
     # Reclaim/promotion already ran, so bookkeeping stays live; deferred tasks
     # wait for a later tick. "unknown" imposes no restriction.
-    pressure = _memory_pressure_level()
+    # Keep the facade monkeypatch seam alive: tests and integrations historically
+    # patched ``kanban_db._memory_pressure_level`` while this dispatcher lived in
+    # that module. The late-bound facade call preserves that behavior after the
+    # split without changing the default implementation.
+    pressure = _kb._memory_pressure_level()
     if pressure == "critical":
         result.memory_pressure = pressure
         _kb._log.warning(

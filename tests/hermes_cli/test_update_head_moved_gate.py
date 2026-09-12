@@ -95,6 +95,9 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
     monkeypatch.setattr(
         hermes_main, "_record_bytecode_fingerprint", lambda *a, **k: None
     )
+    # The real purge evicts the mocked gateway/inventory modules after the
+    # simulated pull, exposing the live gateway to this isolated test.
+    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda: None)
     monkeypatch.setattr(
         main_web_build, "_record_bytecode_fingerprint", lambda *a, **k: None
     )
@@ -127,6 +130,7 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
     monkeypatch.setattr(
         hermes_gateway, "find_profile_gateway_processes", lambda *a, **k: []
     )
+    monkeypatch.setattr("hermes_cli.update_cmd.os.kill", lambda *a, **k: None)
 
 
 def test_update_success_when_head_moves(monkeypatch, tmp_path, capsys):

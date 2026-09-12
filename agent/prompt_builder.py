@@ -9,11 +9,12 @@ import json
 import logging
 import os
 import queue
+import re
 import sys
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Collection, Dict, Optional
 
 from hermes_constants import (
     get_hermes_home, get_skills_dir, is_wsl, reset_hermes_home_override, set_hermes_home_override,
@@ -206,7 +207,10 @@ USER_PROFILE_GUIDANCE = build_memory_guidance(False, True)
 
 SESSION_SEARCH_GUIDANCE = (
     "When the user references something from a past conversation or you suspect relevant cross-session "
-    "context exists, use session_search to recall it before asking them to repeat themselves."
+    "context exists, use session_search to recall it before asking them to repeat themselves. "
+    "Use session_list to browse recent sessions and session_read to inspect a specific session when "
+    "the search result needs more detail. For local notes or indexed documents, use knowledge_search "
+    "and knowledge_read instead of relying on conversation history."
 )
 
 # The opening sentence is worded deliberately: Anthropic's server-side filter rejected the previous phrasing
@@ -475,6 +479,131 @@ def execution_guidance_text(valid_tool_names=None) -> str:
         text = text.replace("- Current facts (weather, news, versions) → use web_search\n", "")
         text = text.replace("(search_files, web_search, read_file, etc.)", "(search_files, read_file, etc.)")
     return text
+
+
+def _normalize_tool_name_set(available_tools: Optional[Collection[str]]) -> set[str]:
+    """Normalize tool-name collections for capability-aware prompt guidance."""
+    if not available_tools:
+        return set()
+    return {str(name).strip() for name in available_tools if isinstance(name, str) and str(name).strip()}
+
+
+def build_openai_model_execution_guidance(
+    available_tools: Optional[Collection[str]] = None,
+) -> str:
+    """Return GPT/Codex execution guidance trimmed to the live tool surface."""
+    tools = _normalize_tool_name_set(available_tools)
+    if not tools:
+        return OPENAI_MODEL_EXECUTION_GUIDANCE
+
+    has_terminal = "terminal" in tools
+    has_execute_code = "execute_code" in tools
+    has_file_read = bool({"read_file", "search_files"} & tools)
+    has_web_search = "web_search" in tools
+    mandatory_lines: list[str] = []
+    if has_terminal or has_execute_code:
+        if has_terminal and has_execute_code:
+            mandatory_lines.append("- Arithmetic, math, calculations → use terminal or execute_code")
+        elif has_execute_code:
+            mandatory_lines.append("- Arithmetic, math, calculations → use execute_code")
+        else:
+            mandatory_lines.append("- Arithmetic, math, calculations → use terminal")
+    if has_terminal:
+        mandatory_lines.extend([
+            "- Hashes, encodings, checksums → use terminal (e.g. sha256sum, base64)",
+            "- Current time, date, timezone → use terminal (e.g. date)",
+            "- System state: OS, CPU, memory, disk, ports, processes → use terminal",
+            "- Git history, branches, diffs → use terminal",
+        ])
+    if has_file_read or has_terminal:
+        file_tools = [name for name in ("read_file", "search_files") if name in tools]
+        if has_terminal:
+            file_tools.append("terminal")
+        mandatory_lines.append("- File contents, sizes, line counts → use " + ", ".join(file_tools))
+    if has_web_search:
+        mandatory_lines.append("- Current facts (weather, news, versions) → use web_search")
+
+    sections = [
+        "# Execution discipline\n"
+        "<tool_persistence>\n"
+        "- Use tools whenever they improve correctness, completeness, or grounding.\n"
+        "- Do not stop early if another tool call would materially improve the result.\n"
+        "- If a tool returns empty or partial results, retry with a different query or strategy.\n"
+        "- Keep calling tools until the task is complete and verified.\n"
+        "</tool_persistence>"
+    ]
+    if mandatory_lines:
+        sections.append(
+            "<mandatory_tool_use>\n"
+            "NEVER answer these from memory or mental computation — ALWAYS use a tool:\n"
+            + "\n".join(mandatory_lines)
+            + "\nMemory and user profile describe the USER, not the live system.\n"
+            "</mandatory_tool_use>"
+        )
+    if has_terminal:
+        sections.append(
+            "<act_dont_ask>\n"
+            "When a question has an obvious default interpretation, act immediately instead of asking. Examples:\n"
+            "- 'Is port 443 open?' → check THIS machine (don't ask 'open where?')\n"
+            "- 'What OS am I running?' → check the live system (don't use user profile)\n"
+            "- 'What time is it?' → run `date` (don't guess)\n"
+            "Only clarify when the ambiguity changes the tool to call.\n"
+            "</act_dont_ask>"
+        )
+    else:
+        sections.append(
+            "<act_dont_ask>\n"
+            "When a question has an obvious default interpretation, act immediately instead of asking.\n"
+            "Only clarify when the ambiguity changes the tool to call.\n"
+            "</act_dont_ask>"
+        )
+    sections.extend([
+        "<prerequisite_checks>\n"
+        "- Before acting, check whether prerequisite discovery, lookup, or context-gathering is needed.\n"
+        "- Do not skip prerequisite steps because the final action seems obvious.\n"
+        "- If a task depends on output from a prior step, resolve that dependency first.\n"
+        "</prerequisite_checks>",
+        "<verification>\n"
+        "Before finalizing your response:\n"
+        "- Correctness: does the output satisfy every stated requirement?\n"
+        "- Grounding: are factual claims backed by tool outputs or provided context?\n"
+        "- Formatting: does the output match the requested format or schema?\n"
+        "- Safety: if the next step has side effects (file writes, commands, API calls), confirm scope before executing.\n"
+        "</verification>",
+        "<missing_context>\n"
+        "- If required context is missing, do NOT guess or hallucinate an answer.\n"
+        "- Use the appropriate lookup tool when the information is retrievable (search_files, web_search, read_file, etc.).\n"
+        "- Ask a clarifying question only when the information cannot be retrieved by tools.\n"
+        "- If you must proceed with incomplete information, label assumptions explicitly.\n"
+        "</missing_context>",
+    ])
+    return "\n\n".join(sections)
+
+
+def build_google_model_operational_guidance(
+    available_tools: Optional[Collection[str]] = None,
+) -> str:
+    """Return Gemini/Gemma operational guidance trimmed to available tools."""
+    tools = _normalize_tool_name_set(available_tools)
+    if not tools:
+        return GOOGLE_MODEL_OPERATIONAL_GUIDANCE
+    lines = ["# Google model operational directives"]
+    if {"read_file", "search_files"} & tools:
+        lines.extend([
+            "- **Absolute paths:** Use absolute paths for file operations.",
+            "- **Verify first:** Use read_file/search_files to inspect files and structure before editing.",
+        ])
+    if "terminal" in tools:
+        lines.extend([
+            "- **Dependency checks:** Check package manifests before importing or installing.",
+            "- **Non-interactive commands:** Use flags like -y, --yes, or --non-interactive to avoid hangs.",
+        ])
+    lines.extend([
+        "- **Conciseness:** Keep explanations brief and action-focused.",
+        "- **Parallel tool calls:** Batch independent tool calls in one response.",
+        "- **Keep going:** Work autonomously until the task is fully resolved.",
+    ])
+    return "\n".join(lines)
 
 
 # Gemini/Gemma-specific operational guidance, adapted from OpenCode's gemini.txt.
@@ -753,6 +882,46 @@ PLATFORM_HINTS = {
     # No "webui" hint on purpose: nothing constructs platform="webui" (the dashboard chat resolves to
     # 'desktop' or 'tui'). If a real WebUI chat surface ships, write a hint from its actual renderer.
 }
+
+
+_PLATFORM_HINTS_NO_MEDIA = {
+    "whatsapp": "You are on WhatsApp. Do not use markdown.",
+    "telegram": (
+        "You are on Telegram. Standard Markdown is automatically converted to Telegram formatting. "
+        "Supported: **bold**, *italic*, ~~strikethrough~~, ||spoiler||, `code`, ```blocks```, [links](url), "
+        "and ## headers. Telegram has no table syntax, so prefer bullets or key: value lists."
+    ),
+    "discord": "You are in Discord.",
+    "slack": "You are in Slack.",
+    "signal": "You are on Signal. Do not use markdown.",
+    "mattermost": "You are in Mattermost. Standard Markdown works, including tables.",
+    "matrix": "You are in Matrix. Markdown works and is converted to rich display.",
+    "feishu": "You are in Feishu (Lark). Markdown works.",
+}
+
+
+def _tools_can_emit_media(available_tools: Optional[Collection[str]]) -> bool:
+    tools = {str(name).strip().lower() for name in (available_tools or ()) if name}
+    if not tools:
+        return False
+    if tools & {"image_gen", "send_image_file", "tts", "video_gen", "vision"}:
+        return True
+    return any(name.startswith(("image_", "video_", "audio_")) for name in tools)
+
+
+def build_platform_hint(
+    platform_key: str,
+    available_tools: Optional[Collection[str]] = None,
+) -> str:
+    """Return platform guidance, omitting media delivery when the toolset cannot emit media."""
+    key = (platform_key or "").lower().strip()
+    hint = PLATFORM_HINTS.get(key, "")
+    if not hint:
+        return ""
+    if key in _PLATFORM_HINTS_NO_MEDIA and not _tools_can_emit_media(available_tools):
+        return _PLATFORM_HINTS_NO_MEDIA[key]
+    return hint
+
 
 # Telegram rich-messages extension — injected only with
 # ``platforms.telegram.extra.rich_messages: true`` (gateway.* or top-level).
@@ -1071,6 +1240,17 @@ _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
 _SKILLS_SNAPSHOT_VERSION = 2
 
 
+_SKILL_QUERY_STOPWORDS = frozenset(
+    {
+        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+        "help", "how", "i", "if", "in", "into", "is", "it", "me", "my",
+        "of", "on", "or", "please", "set", "setup", "that", "the", "this",
+        "to", "up", "use", "using", "want", "with",
+    }
+)
+_DEFAULT_SKILL_CANDIDATE_LIMIT = 8
+
+
 def _skills_prompt_snapshot_path() -> Path:
     return get_hermes_home() / ".skills_prompt_snapshot.json"
 
@@ -1140,10 +1320,17 @@ def _build_snapshot_entry(skill_file: Path, skills_dir: Path, frontmatter: dict,
     category = "general" if len(parts) < 2 else "/".join(parts[:-2]) if len(parts) > 2 else parts[0]
     platforms = frontmatter.get("platforms") or []
     platforms = [platforms] if isinstance(platforms, str) else platforms
+    raw_metadata = frontmatter.get("metadata")
+    metadata: dict = raw_metadata if isinstance(raw_metadata, dict) else {}
+    raw_hermes_metadata = metadata.get("hermes")
+    hermes_metadata: dict = raw_hermes_metadata if isinstance(raw_hermes_metadata, dict) else {}
+    tags = hermes_metadata.get("tags") or []
+    tags = [tags] if isinstance(tags, str) else tags
     entry = {
         "skill_name": skill_name, "category": category, "frontmatter_name": str(frontmatter.get("name", skill_name)),
         "description": description, "platforms": [str(p).strip() for p in platforms if str(p).strip()],
         "conditions": extract_skill_conditions(frontmatter),
+        "tags": [str(tag).strip() for tag in tags if str(tag).strip()],
     }
     if org_id:
         entry["org_id"] = org_id
@@ -1201,9 +1388,109 @@ def _current_session_platform_hint() -> str:
         return ""
 
 
+def _normalize_skill_query_terms(text: str) -> list[str]:
+    normalized = re.sub(r"[^a-z0-9]+", " ", (text or "").lower())
+    return [term for term in normalized.split() if len(term) >= 2 and term not in _SKILL_QUERY_STOPWORDS]
+
+
+def _score_skill_entry(entry: dict, query_terms: list[str], normalized_query: str) -> int:
+    if not query_terms:
+        return 0
+
+    name = str(entry.get("frontmatter_name") or entry.get("skill_name") or "")
+    category = str(entry.get("category") or "")
+    description = str(entry.get("description") or "")
+    tags = [str(tag) for tag in (entry.get("tags") or [])]
+
+    norm_name = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+    norm_category = re.sub(r"[^a-z0-9]+", " ", category.lower()).strip()
+    norm_description = re.sub(r"[^a-z0-9]+", " ", description.lower()).strip()
+    norm_tags = [re.sub(r"[^a-z0-9]+", " ", tag.lower()).strip() for tag in tags]
+    combined = " ".join(part for part in [norm_name, norm_category, norm_description, *norm_tags] if part)
+
+    score = 0
+    if norm_name and norm_name in normalized_query:
+        score += 25
+    compact_name = norm_name.replace(" ", "")
+    compact_query = normalized_query.replace(" ", "")
+    if compact_name and compact_name in compact_query:
+        score += 20
+
+    for term in query_terms:
+        if term in norm_name:
+            score += 8
+        if term in norm_category:
+            score += 5
+        if term in norm_description:
+            score += 3
+        if any(term in tag for tag in norm_tags):
+            score += 6
+
+    matched_terms = sum(1 for term in query_terms if term in combined)
+    if matched_terms:
+        score += matched_terms * 2
+    if matched_terms == len(query_terms):
+        score += 8
+    return score
+
+
+def _select_skill_candidates(
+    skill_entries: list[dict],
+    query: str,
+    *,
+    limit: int = _DEFAULT_SKILL_CANDIDATE_LIMIT,
+) -> list[dict]:
+    query_terms = _normalize_skill_query_terms(query)
+    normalized_query = re.sub(r"[^a-z0-9]+", " ", (query or "").lower()).strip()
+    if not query_terms:
+        return []
+
+    ranked: list[tuple[int, str, str, dict]] = []
+    for entry in skill_entries:
+        score = _score_skill_entry(entry, query_terms, normalized_query)
+        if score > 0:
+            ranked.append((
+                score,
+                str(entry.get("category") or ""),
+                str(entry.get("frontmatter_name") or entry.get("skill_name") or ""),
+                entry,
+            ))
+    ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return [entry for _score, _category, _name, entry in ranked[:limit]]
+
+
+def _render_skill_entries_by_category(
+    skill_entries: list[dict],
+    category_descriptions: dict[str, str],
+    *,
+    names_only: bool = False,
+) -> list[str]:
+    skills_by_category: dict[str, list[tuple[str, str]]] = {}
+    for entry in skill_entries:
+        category = str(entry.get("category") or "general")
+        name = str(entry.get("frontmatter_name") or entry.get("skill_name") or "")
+        description = str(entry.get("description") or "")
+        skills_by_category.setdefault(category, []).append((name, description))
+
+    index_lines: list[str] = []
+    for category in sorted(skills_by_category):
+        cat_desc = category_descriptions.get(category, "")
+        index_lines.append(f"  {category}: {cat_desc}" if cat_desc else f"  {category}:")
+        seen: set[str] = set()
+        for name, description in sorted(skills_by_category[category], key=lambda item: item[0]):
+            if name in seen:
+                continue
+            seen.add(name)
+            index_lines.append(
+                f"    - {name}: {description}" if description and not names_only else f"    - {name}"
+            )
+    return index_lines
+
+
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None, available_toolsets: "set[str] | None" = None,
     compact_categories: "frozenset[str] | None" = None, skills_dir_override: "Path | None" = None,
+    query: str | None = None, candidate_limit: int = _DEFAULT_SKILL_CANDIDATE_LIMIT,
 ) -> str:
     """Compact skill index for the system prompt.
 
@@ -1226,7 +1513,9 @@ def build_skills_system_prompt(
         if not skills_dir.exists() and not external_dirs and not project_dirs:
             return ""
         return _build_skills_system_prompt_inner(
-            skills_dir, external_dirs, available_tools, available_toolsets, compact_categories, project_dirs)
+            skills_dir, external_dirs, available_tools, available_toolsets, compact_categories, project_dirs,
+            query=query, candidate_limit=candidate_limit,
+        )
     finally:
         if _home_token is not None:
             reset_hermes_home_override(_home_token)
@@ -1252,7 +1541,7 @@ def _read_category_descriptions(root: Path, log_fmt: str) -> dict[str, str]:
 
 def _collect_extra_skills(
     root: Path, skill_files, hides, claimed: set[str], skills_by_category: dict[str, list[tuple[str, str]]],
-    *, desc_prefix: str, log_fmt: str,
+    *, desc_prefix: str, log_fmt: str, collected: Optional[list[dict]] = None,
 ) -> None:
     """Add visible skills from a project/external dir; names already in *claimed* are skipped."""
     for skill_file in skill_files:
@@ -1263,6 +1552,8 @@ def _collect_extra_skills(
             if not entry or fm_name in claimed or hides(fm_name, entry["skill_name"], extract_skill_conditions(frontmatter)):
                 continue
             claimed.add(fm_name)
+            if collected is not None:
+                collected.append(entry)
             skills_by_category.setdefault(entry["category"], []).append((fm_name, f"{desc_prefix}{entry['description']}".strip()))
         except Exception as e:
             logger.debug(log_fmt, skill_file, e)
@@ -1342,16 +1633,22 @@ def _build_skills_system_prompt_inner(
     skills_dir: "Path", external_dirs: "list[Path]", available_tools: "set[str] | None",
     available_toolsets: "set[str] | None", compact_categories: "frozenset[str] | None",
     project_dirs: "list[Path] | None" = None,
+    *, query: str | None = None, candidate_limit: int = _DEFAULT_SKILL_CANDIDATE_LIMIT,
 ) -> str:
     # The resolved platform is part of the key: per-platform disabled-skill lists need distinct cache entries.
     _platform_hint = _current_session_platform_hint()
     disabled = get_disabled_skill_names(_platform_hint or None)
+    try:
+        effective_candidate_limit = max(1, int(candidate_limit))
+    except (TypeError, ValueError):
+        effective_candidate_limit = _DEFAULT_SKILL_CANDIDATE_LIMIT
     project_dirs = project_dirs or []
     cache_key = (
         str(skills_dir), tuple(str(d) for d in external_dirs), tuple(str(d) for d in project_dirs),
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
+        (query or "").strip().lower(), effective_candidate_limit,
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1384,13 +1681,18 @@ def _build_skills_system_prompt_inner(
 
     # Project-local skills (highest precedence) shadow same-named profile-local skills; tagged [project].
     project_names: set[str] = set()
+    project_entries: list[dict] = []
     if project_dirs:
         from agent.skill_utils import iter_project_skill_files
         for proj_dir in (d for d in project_dirs if d.exists()):
-            _collect_extra_skills(proj_dir, iter_project_skill_files(proj_dir), hides, project_names, skills_by_category,
-                                  desc_prefix="[project] ", log_fmt="Error reading project skill %s: %s")
+            _collect_extra_skills(
+                proj_dir, iter_project_skill_files(proj_dir), hides, project_names, skills_by_category,
+                desc_prefix="[project] ", log_fmt="Error reading project skill %s: %s", collected=project_entries,
+            )
     # Drop shadowed entries BEFORE org labeling so collision flags don't fire on intentional overrides.
-    _label_visible_entries([e for e in visible_entries if _entry_name(e) not in project_names], skills_by_category)
+    visible_entries = [e for e in visible_entries if _entry_name(e) not in project_names]
+    _label_visible_entries(visible_entries, skills_by_category)
+    available_skill_entries: list[dict] = [*visible_entries, *project_entries]
     if snapshot is None:  # persist for fast cold-start reuse (best-effort)
         category_descriptions.update(_read_category_descriptions(skills_dir, "Could not read skill description %s: %s"))
         try:
@@ -1404,12 +1706,51 @@ def _build_skills_system_prompt_inner(
     # External skill directories: scanned directly (read-only, small); names already indexed are skipped.
     seen_skill_names: set[str] = {name for cat in skills_by_category.values() for name, _ in cat}
     for ext_dir in (d for d in external_dirs if d.exists()):
-        _collect_extra_skills(ext_dir, iter_skill_index_files(ext_dir, "SKILL.md"), hides, seen_skill_names,
-                              skills_by_category, desc_prefix="", log_fmt="Error reading external skill %s: %s")
+        _collect_extra_skills(
+            ext_dir, iter_skill_index_files(ext_dir, "SKILL.md"), hides, seen_skill_names,
+            skills_by_category, desc_prefix="", log_fmt="Error reading external skill %s: %s",
+            collected=available_skill_entries,
+        )
         for cat, cat_desc in _read_category_descriptions(ext_dir, "Could not read external skill description %s: %s").items():
             category_descriptions.setdefault(cat, cat_desc)
 
-    result = _render_skills_index(skills_by_category, category_descriptions, compact_categories, available_tools)
+    query_text = (query or "").strip()
+    if query_text:
+        selected_entries = _select_skill_candidates(
+            available_skill_entries,
+            query_text,
+            limit=effective_candidate_limit,
+        )
+        if selected_entries:
+            index_lines = _render_skill_entries_by_category(selected_entries, category_descriptions)
+            result = (
+                "## Skills (mandatory)\n"
+                "Use the current user request to choose from the candidate skills below. "
+                "If a skill matches or is even partially relevant, you MUST load it with skill_view(name) "
+                "and follow its instructions. The full skill catalog is omitted here to conserve tokens; "
+                "if none of these candidates fit, call skills_list() before proceeding without a skill.\n\n"
+                "<candidate_skills>\n"
+                + "\n".join(index_lines)
+                + "\n</candidate_skills>\n\n"
+                "Only proceed without loading a skill if genuinely none are relevant to the task."
+            )
+        else:
+            index_lines = _render_skill_entries_by_category(
+                available_skill_entries,
+                category_descriptions,
+                names_only=True,
+            )
+            result = (
+                "## Skills (mandatory)\n"
+                "No high-confidence skill matches were preselected for the current request. "
+                "Use the compact catalog below to decide whether to call skill_view(name), or call "
+                "skills_list() for the full metadata-rich catalog before proceeding without a skill.\n\n"
+                "<available_skills>\n"
+                + "\n".join(index_lines)
+                + "\n</available_skills>\n"
+            )
+    else:
+        result = _render_skills_index(skills_by_category, category_descriptions, compact_categories, available_tools)
     with _SKILLS_PROMPT_CACHE_LOCK:
         _SKILLS_PROMPT_CACHE[cache_key] = result
         _SKILLS_PROMPT_CACHE.move_to_end(cache_key)

@@ -14,8 +14,10 @@ import asyncio
 import atexit
 import contextlib
 import contextvars
+import inspect
 import json
 import logging
+import math
 import os
 import queue
 import sys
@@ -26,6 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider, RecallStatus
+from agent.durable_memory_guard import MAX_DURABLE_MEMORY_CHARS, guard_durable_memory_content
 from agent.secret_scope import get_secret
 from hermes_cli.config import cfg_get
 from hermes_constants import get_hermes_home
@@ -41,18 +44,33 @@ from .settings import (
     _DEFAULT_API_URL, _DEFAULT_IDLE_TIMEOUT, _DEFAULT_LOCAL_URL, _DEFAULT_RETAIN_SOURCE,
     _DEFAULT_TIMEOUT, _HINDSIGHT_GLYPH, _MIN_CLIENT_VERSION, _MIN_VERSION_FOR_UPDATE_MODE_APPEND,
     _PROVIDER_DEFAULT_MODELS, _VALID_BUDGETS, _daemon_llm_provider,
-    _normalize_observation_scopes, _normalize_retain_tags, _parse_int_setting,
-    _resolve_bank_id_template,
+    _normalize_observation_scopes, _normalize_recall_tags, _normalize_retain_tags, _parse_int_setting,
+    _resolve_bank_id_template, _sanitize_bank_segment,
 )
 
 logger = logging.getLogger(__name__)
 
 _LOCAL_MODES = {"local", "local_embedded"}
 _RETAIN_CONTEXT_DEFAULT = "conversation between Hermes Agent and the User"
+_UNSET = object()
+_RECALL_TAG_MATCHES = {"any", "all", "any_strict", "all_strict"}
+_VALID_RECALL_SCORE_KEYS = {"semantic", "keyword", "reranker", "final"}
+_BOUNDED_RECALL_SCORE_KEYS = {"semantic", "reranker"}
+_DEFAULT_SHADOW_PROMOTION_MAX_CHARS = 8_000
+_SHADOW_PROMOTION_TAGS = ("shadow-candidate", "promotion-pending-review")
 
 
-def _ensure_client_dependency() -> None:
+def _ensure_client_dependency(module_name: str) -> None:
     """Lazily install the Hindsight client (``tools.lazy_deps``) before importing it."""
+    # A test, embedded runtime, or site-packages shim may already provide the
+    # exact module even when its distribution metadata is absent. Do not ask
+    # lazy_deps to install over an importable module.
+    try:
+        import importlib
+        importlib.import_module(module_name)
+        return
+    except ModuleNotFoundError:
+        pass
     try:
         from tools.lazy_deps import ensure as _lazy_ensure
         _lazy_ensure("memory.hindsight", prompt=False)
@@ -66,6 +84,56 @@ def _cloud_api_key(config: dict) -> str:
     return config.get("apiKey") or config.get("api_key") or get_secret("HINDSIGHT_API_KEY", "")
 
 
+def _parse_bool_setting(value: Any, default: bool) -> bool:
+    """Parse a boolean config value without treating arbitrary strings as true."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _normalize_recall_min_scores(value: Any) -> dict[str, float] | None:
+    """Validate optional Hindsight recall score floors before sending them."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            logger.warning("Invalid Hindsight recall_min_scores JSON; ignoring it")
+            return None
+    if not isinstance(value, dict):
+        logger.warning("Invalid Hindsight recall_min_scores value; expected an object")
+        return None
+
+    normalized: dict[str, float] = {}
+    for raw_key, raw_score in value.items():
+        key = str(raw_key).strip()
+        if key not in _VALID_RECALL_SCORE_KEYS:
+            logger.warning("Ignoring unknown Hindsight recall score floor %r", key)
+            continue
+        try:
+            score = float(raw_score)
+        except (TypeError, ValueError):
+            logger.warning("Ignoring non-numeric Hindsight recall score floor %r", raw_score)
+            continue
+        if not math.isfinite(score) or score < 0:
+            logger.warning("Ignoring invalid Hindsight recall score floor %r", raw_score)
+            continue
+        if key in _BOUNDED_RECALL_SCORE_KEYS and score > 1:
+            logger.warning("Ignoring out-of-range Hindsight %s score floor %r", key, raw_score)
+            continue
+        normalized[key] = score
+    return normalized or None
+
+
 def _maybe_upgrade_client() -> None:
     """Auto-upgrade an outdated hindsight-client via the environment-aware lazy_deps
     installer (sealed hosted venvs redirect to the durable target)."""
@@ -74,17 +142,17 @@ def _maybe_upgrade_client() -> None:
         from packaging.version import Version
         installed = pkg_version("hindsight-client")
         if Version(installed) < Version(_MIN_CLIENT_VERSION):
-            logger.warning("hindsight-client %s is outdated (need >=%s), attempting upgrade...",
+            logger.warning("hindsight-client %s is outdated (need ==%s), attempting upgrade...",
                            installed, _MIN_CLIENT_VERSION)
             from tools.lazy_deps import install_specs
-            outcome = install_specs([f"hindsight-client>={_MIN_CLIENT_VERSION}"], timeout=120)
+            outcome = install_specs([f"hindsight-client=={_MIN_CLIENT_VERSION}"], timeout=120)
             if outcome.ok:
-                logger.info("hindsight-client upgraded to >=%s", _MIN_CLIENT_VERSION)
+                logger.info("hindsight-client upgraded to ==%s", _MIN_CLIENT_VERSION)
             elif outcome.blocked:
-                logger.warning("Auto-upgrade unavailable: %s. Run: uv pip install 'hindsight-client>=%s'",
+                logger.warning("Auto-upgrade unavailable: %s. Run: uv pip install 'hindsight-client==%s'",
                                outcome.reason, _MIN_CLIENT_VERSION)
             else:
-                logger.warning("Auto-upgrade failed: %s. Run: uv pip install 'hindsight-client>=%s'",
+                logger.warning("Auto-upgrade failed: %s. Run: uv pip install 'hindsight-client==%s'",
                                (outcome.stderr or "").strip() or "install error", _MIN_CLIENT_VERSION)
     except Exception:
         pass  # packaging not available or other issue — proceed anyway
@@ -218,8 +286,26 @@ RECALL_SCHEMA = {
         "Search long-term memory. Returns memories ranked by relevance using "
         "semantic search, keyword matching, entity graph traversal, and reranking."
     ),
-    "parameters": {"type": "object", "required": ["query"],
-                   "properties": {"query": {"type": "string", "description": "What to search for."}}},
+    "parameters": {
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+            "query": {"type": "string", "description": "What to search for."},
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional per-call tags to filter this search. Overrides configured "
+                    "recall_tags; pass an empty array to clear the configured filter."
+                ),
+            },
+            "tags_match": {
+                "type": "string",
+                "enum": ["any", "all", "any_strict", "all_strict"],
+                "description": "How to match the per-call tags.",
+            },
+        },
+    },
 }
 
 REFLECT_SCHEMA = {
@@ -308,6 +394,11 @@ class HindsightMemoryProvider(MemoryProvider):
         self._timeout, self._idle_timeout = _DEFAULT_TIMEOUT, _DEFAULT_IDLE_TIMEOUT
         self._bank_id, self._budget, self._bank_id_template = "hermes", "mid", ""
         self._bank_mission, self._bank_retain_mission = "", None
+        self._recall_min_scores: dict[str, float] | None = None
+        self._recall_prefer_observations = True
+        self._shadow_promotion_enabled = False
+        self._shadow_promotion_bank_id = ""
+        self._shadow_promotion_max_chars = _DEFAULT_SHADOW_PROMOTION_MAX_CHARS
         self._memory_mode = "hybrid"  # "context", "tools", or "hybrid"
         self._prefetch_method = "recall"  # "recall" or "reflect"
         for name in _SESSION_KWARGS:
@@ -409,6 +500,9 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "llm_model", "description": "LLM model", "default": "gpt-4o-mini", "default_from": {"field": "llm_provider", "map": _PROVIDER_DEFAULT_MODELS}, "when": {"mode": "local_embedded"}},
             {"key": "bank_id", "description": "Memory bank name (static fallback when bank_id_template is unset)", "default": "hermes"},
             {"key": "bank_id_template", "description": "Optional template to derive bank_id dynamically. Placeholders: {profile}, {workspace}, {platform}, {user}, {session}. Example: hermes-{profile}", "default": ""},
+            {"key": "shadow_promotion_enabled", "description": "Promote a bounded, review-only session summary to a separate Hindsight bank", "default": False},
+            {"key": "shadow_promotion_bank_id", "description": "Explicit Hindsight bank for review-only shadow candidates", "default": ""},
+            {"key": "shadow_promotion_max_chars", "description": "Maximum serialized shadow candidate size", "default": _DEFAULT_SHADOW_PROMOTION_MAX_CHARS},
             {"key": "bank_mission", "description": "Mission/purpose description for the memory bank"},
             {"key": "bank_retain_mission", "description": "Custom extraction prompt for memory retention"},
             {"key": "recall_budget", "description": "Recall thoroughness", "default": "mid", "choices": ["low", "mid", "high"]},
@@ -421,6 +515,8 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "retain_assistant_prefix", "description": "Label used before assistant turns in retained transcripts", "default": "Assistant"},
             {"key": "recall_tags", "description": "Tags to filter when searching memories (comma-separated)", "default": ""},
             {"key": "recall_tags_match", "description": "Tag matching mode for recall", "default": "any", "choices": ["any", "all", "any_strict", "all_strict"]},
+            {"key": "recall_min_scores", "description": "Optional Hindsight recall score floors as a JSON object (for example {\"semantic\": 0.2})", "default": ""},
+            {"key": "recall_prefer_observations", "description": "Prefer consolidated observations over raw facts when the Hindsight client supports it", "default": True},
             {"key": "recall_types", "description": "Fact types to surface on recall — applies to both auto-recall and the hindsight_recall tool (comma-separated or list). Defaults to observation-only — observations are Hindsight's consolidated, deduplicated, evidence-grounded knowledge layer; raw world/experience facts are the supporting evidence observations already summarize. Set to e.g. 'observation,world,experience' to also include raw facts.", "default": "observation"},
             {"key": "auto_recall", "description": "Automatically recall memories before each turn", "default": True},
             {"key": "recall_sync", "description": "Recall synchronously against the current message before each turn (higher relevance, adds recall latency to the turn). Default off: recall runs in the background and is injected on the next turn.", "default": False},
@@ -435,6 +531,7 @@ class HindsightMemoryProvider(MemoryProvider):
             {"key": "recall_max_tokens", "description": "Maximum tokens for recall results", "default": 4096},
             {"key": "recall_max_input_chars", "description": "Maximum input query length for auto-recall", "default": 800},
             {"key": "recall_prompt_preamble", "description": "Custom preamble for recalled memories in context"},
+            {"key": "shadow_promotion", "description": "Promote a bounded shadow summary of completed sessions to a separate Hindsight bank", "default": {}},
             {"key": "timeout", "description": "API request timeout in seconds", "default": _DEFAULT_TIMEOUT},
             {"key": "idle_timeout", "description": "Embedded daemon idle timeout in seconds (0 disables auto-shutdown)", "default": _DEFAULT_IDLE_TIMEOUT, "when": {"mode": "local_embedded"}},
             {"key": "port_health_grace_timeout", "description": "Seconds to wait for a slow daemon /health before treating it as stale (raise on busy/low-resource hosts; blank uses the 30s default)", "default": "", "when": {"mode": "local_embedded"}},
@@ -451,7 +548,7 @@ class HindsightMemoryProvider(MemoryProvider):
         available, reason = _check_local_runtime()
         if not available:
             raise RuntimeError("Hindsight local runtime is unavailable" + (f": {reason}" if reason else ""))
-        _ensure_client_dependency()
+        _ensure_client_dependency("hindsight")
         from hindsight import HindsightEmbedded
         HindsightEmbedded.__del__ = lambda self: None
         cfg = self._config
@@ -469,7 +566,7 @@ class HindsightMemoryProvider(MemoryProvider):
         return HindsightEmbedded(**kwargs)
 
     def _new_cloud_client(self):
-        _ensure_client_dependency()
+        _ensure_client_dependency("hindsight_client")
         from hindsight_client import Hindsight
         kwargs = {"base_url": self._api_url, "timeout": float(self._timeout or _DEFAULT_TIMEOUT)}
         if self._api_key:
@@ -726,6 +823,21 @@ class HindsightMemoryProvider(MemoryProvider):
         self._prefetch_method = prefetch_method if prefetch_method in {"recall", "reflect"} else "recall"
         self._bank_mission = cfg.get("bank_mission", "")
         self._bank_retain_mission = cfg.get("bank_retain_mission") or None
+        shadow = cfg.get("shadow_promotion") or {}
+        if not isinstance(shadow, dict):
+            shadow = {}
+        shadow_enabled = shadow.get("enabled", cfg.get("shadow_promotion_enabled"))
+        shadow_bank_id = shadow.get("bank_id", cfg.get("shadow_promotion_bank_id"))
+        shadow_max_chars = shadow.get("max_chars", cfg.get("shadow_promotion_max_chars", _DEFAULT_SHADOW_PROMOTION_MAX_CHARS))
+        self._shadow_promotion_enabled = _parse_bool_setting(shadow_enabled, False)
+        self._shadow_promotion_bank_id = _sanitize_bank_segment(
+            str(shadow_bank_id or f"{self._bank_id}-shadow")
+        ) or f"{self._bank_id}-shadow"
+        try:
+            requested_max_chars = int(shadow_max_chars)
+        except (TypeError, ValueError):
+            requested_max_chars = _DEFAULT_SHADOW_PROMOTION_MAX_CHARS
+        self._shadow_promotion_max_chars = max(0, min(requested_max_chars, MAX_DURABLE_MEMORY_CHARS))
 
     def _apply_retain_settings(self, cfg: dict) -> None:
         def _cfg_or_env(key: str, env_var: str, default: str = "") -> Any:
@@ -760,8 +872,13 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def _apply_recall_settings(self, cfg: dict) -> None:
         """Recall knobs are pure config too (``{}`` yields the defaults)."""
-        self._recall_tags = cfg.get("recall_tags") or None
-        self._recall_tags_match = cfg.get("recall_tags_match", "any")
+        self._recall_tags = _normalize_recall_tags(cfg.get("recall_tags")) or None
+        recall_tags_match = cfg.get("recall_tags_match", "any")
+        self._recall_tags_match = recall_tags_match if recall_tags_match in _RECALL_TAG_MATCHES else "any"
+        self._recall_min_scores = _normalize_recall_min_scores(cfg.get("recall_min_scores"))
+        self._recall_prefer_observations = _parse_bool_setting(
+            cfg.get("recall_prefer_observations"), True
+        )
         self._auto_recall = cfg.get("auto_recall", True)
         self._recall_sync = bool(cfg.get("recall_sync", False))
         self._recall_max_tokens = int(cfg.get("recall_max_tokens", 4096))
@@ -783,7 +900,7 @@ class HindsightMemoryProvider(MemoryProvider):
         # PostgreSQL's initdb refuses root; without this guard the start thread
         # retries forever, reloading embedding models (~958MB RAM, ~33% CPU)
         # with no user-visible error.
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
+        if hasattr(os, "geteuid") and os.geteuid() == 0 and not os.environ.get("HERMES_TEST_ISOLATION"):
             msg = ("Hindsight local_embedded mode cannot run as root "
                    "(PostgreSQL initdb refuses root). Skipping the embedded "
                    "memory daemon. Run Hermes as a non-root user, or switch "
@@ -841,20 +958,57 @@ class HindsightMemoryProvider(MemoryProvider):
             logger.debug("Prefetch: skipped (%s)", why)
         return why is not None
 
-    def _recall(self, query: str) -> list:
-        kwargs: dict = {"bank_id": self._bank_id, "query": query, "budget": self._budget, "max_tokens": self._recall_max_tokens}
-        if self._recall_tags:
-            kwargs.update(tags=self._recall_tags, tags_match=self._recall_tags_match)
+    @staticmethod
+    def _client_supports_recall_kwarg(client: Any, name: str) -> bool:
+        """Return whether the installed Hindsight client accepts a recall option."""
+        try:
+            parameters = inspect.signature(client.arecall).parameters.values()
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return any(parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == name
+                   for parameter in parameters)
+
+    def _build_recall_kwargs(self, client: Any, query: str, *, tags: Any = _UNSET,
+                             tags_match: Any = _UNSET) -> dict:
+        if tags is _UNSET:
+            effective_tags = self._recall_tags
+        else:
+            if not isinstance(tags, (list, tuple)) or not all(isinstance(tag, str) for tag in tags):
+                raise ValueError("tags must be an array of strings")
+            effective_tags = _normalize_recall_tags(tags) or None
+        effective_match = self._recall_tags_match if tags_match is _UNSET else tags_match
+        if effective_match not in _RECALL_TAG_MATCHES:
+            raise ValueError(f"tags_match must be one of: {', '.join(sorted(_RECALL_TAG_MATCHES))}")
+
+        kwargs: dict = {
+            "bank_id": self._bank_id,
+            "query": query,
+            "budget": self._budget,
+            "max_tokens": self._recall_max_tokens,
+        }
+        if effective_tags:
+            kwargs.update(tags=effective_tags, tags_match=effective_match)
         if self._recall_types:
             kwargs["types"] = self._recall_types
-        resp = self._run_hindsight_operation(lambda client: client.arecall(**kwargs))
+        if self._recall_prefer_observations and self._client_supports_recall_kwarg(client, "prefer_observations"):
+            kwargs["prefer_observations"] = True
+        if self._recall_min_scores and self._client_supports_recall_kwarg(client, "min_scores"):
+            kwargs["min_scores"] = self._recall_min_scores
+        return kwargs
+
+    def _recall(self, query: str, *, tags: Any = _UNSET, tags_match: Any = _UNSET) -> list:
+        resp = self._run_hindsight_operation(
+            lambda client: client.arecall(**self._build_recall_kwargs(
+                client, query, tags=tags, tags_match=tags_match))
+        )
         return resp.results or []
 
     def _reflect(self, query: str) -> str | None:
         resp = self._run_hindsight_operation(
             lambda client: client.areflect(bank_id=self._bank_id, query=query, budget=self._budget)
         )
-        return resp.text
+        decision = guard_durable_memory_content(resp.text or "")
+        return "" if decision.blocked_reason else decision.content
 
     def _do_recall(self, query: str) -> tuple[str, int]:
         """One recall/reflect for *query* (background prefetch and ``recall_sync`` paths)
@@ -1010,7 +1164,18 @@ class HindsightMemoryProvider(MemoryProvider):
         if session_id:
             self._session_id = str(session_id).strip()
 
-        self._session_turns.append(json.dumps(self._build_turn_messages(user_content, assistant_content), ensure_ascii=False))
+        user_decision = guard_durable_memory_content(user_content)
+        assistant_decision = guard_durable_memory_content(assistant_content)
+        if user_decision.blocked_reason or assistant_decision.blocked_reason:
+            logger.debug(
+                "sync_turn: skipped durable-memory promotion (%s)",
+                user_decision.blocked_reason or assistant_decision.blocked_reason,
+            )
+            return
+        self._session_turns.append(json.dumps(
+            self._build_turn_messages(user_decision.content, assistant_decision.content),
+            ensure_ascii=False,
+        ))
         self._turn_counter = self._turn_index = self._turn_counter + 1
         if remainder := self._turn_counter % self._retain_every_n_turns:
             logger.debug("sync_turn: buffered turn %d (will retain at turn %d)",
@@ -1056,7 +1221,18 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def _tool_retain(self, args: dict) -> str:
         content, context = args["content"], args.get("context")
-        item = self._build_retain_kwargs(content, context=context, tags=args.get("tags"),
+        decision = guard_durable_memory_content(content, context=context)
+        if decision.blocked_reason:
+            logger.info("Tool hindsight_retain rejected: %s", decision.blocked_reason)
+            return f"Memory not stored: {decision.blocked_reason}."
+        safe_context = context
+        if context:
+            context_decision = guard_durable_memory_content(context)
+            if context_decision.blocked_reason:
+                logger.info("Tool hindsight_retain rejected context: %s", context_decision.blocked_reason)
+                return f"Memory not stored: {context_decision.blocked_reason}."
+            safe_context = context_decision.content
+        item = self._build_retain_kwargs(decision.content, context=safe_context, tags=args.get("tags"),
                                          occurred_at=args.get("occurred_at"))
         logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s",
                      self._bank_id, len(content), context)
@@ -1068,7 +1244,11 @@ class HindsightMemoryProvider(MemoryProvider):
         query = args["query"]
         logger.debug("Tool hindsight_recall: bank=%s, query_len=%d, budget=%s",
                      self._bank_id, len(query), self._budget)
-        results = self._recall(query)
+        results = self._recall(
+            query,
+            tags=args.get("tags", _UNSET),
+            tags_match=args.get("tags_match", _UNSET),
+        )
         logger.debug("Tool hindsight_recall: %d results", len(results))
         return "\n".join(f"{i}. {r.text}" for i, r in enumerate(results, 1)) or "No relevant memories found."
 
@@ -1100,6 +1280,81 @@ class HindsightMemoryProvider(MemoryProvider):
             return tool_error(f"{failure}: {e}")
 
     # -- session lifecycle -------------------------------------------------------
+
+    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+        """Queue a bounded, review-only candidate in the explicit shadow bank."""
+        if not self._shadow_promotion_enabled or not self._session_id:
+            return
+        shadow_bank_id = self._shadow_promotion_bank_id
+        if not shadow_bank_id or shadow_bank_id == self._bank_id:
+            logger.warning("Hindsight shadow promotion rejected: candidate bank matches the active bank")
+            return
+
+        candidate_messages: list[dict[str, str]] = []
+        try:
+            for message in messages:
+                if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
+                    continue
+                content = message.get("content")
+                if not isinstance(content, str):
+                    logger.info("Hindsight shadow promotion dropped: message content is not text")
+                    return
+                decision = guard_durable_memory_content(content)
+                if decision.blocked_reason:
+                    logger.info("Hindsight shadow promotion dropped: %s", decision.blocked_reason)
+                    return
+                candidate_messages.append({"role": message["role"], "content": decision.content})
+            if not candidate_messages:
+                return
+
+            content = json.dumps(candidate_messages, ensure_ascii=False)
+            if len(content) > self._shadow_promotion_max_chars:
+                logger.info("Hindsight shadow promotion dropped: candidate exceeds configured size")
+                return
+
+            # Import at call time so tests and deployments can replace the scanner,
+            # and so a scanner failure fails closed before a writer is started.
+            from tools.threat_patterns import scan_for_threats
+            threats = scan_for_threats(content, scope="strict")
+            if threats:
+                logger.info("Hindsight shadow promotion dropped: threat patterns=%s", threats)
+                return
+        except Exception as exc:
+            logger.warning("Hindsight shadow promotion rejected before enqueue: %s", exc)
+            return
+
+        source_session_id = self._session_id
+        source_document_id = self._document_id
+        session_segment = _sanitize_bank_segment(source_session_id) or "unknown"
+        document_segment = _sanitize_bank_segment(source_document_id) or session_segment
+        shadow_document_id = f"shadow-{session_segment}-{document_segment}"
+        metadata = {
+            "candidate_only": "true",
+            "candidate_status": "pending_review",
+            "source_ref": f"hermes-session:{source_session_id}",
+            "source_session_id": source_session_id,
+            "source_document_id": source_document_id,
+            "retained_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        }
+        item = {
+            "content": content,
+            "metadata": metadata,
+            "tags": list(_SHADOW_PROMOTION_TAGS),
+            "timestamp": _event_timestamp(),
+        }
+
+        def _job() -> None:
+            try:
+                self._retain_batch(
+                    item,
+                    bank_id=shadow_bank_id,
+                    document_id=shadow_document_id,
+                    retain_async=self._retain_async,
+                )
+            except Exception as exc:
+                logger.warning("Hindsight shadow promotion failed: %s", exc, exc_info=True)
+
+        self._enqueue_retain(_job)
 
     def on_session_switch(self, new_session_id: str, *, parent_session_id: str = "",
                           reset: bool = False, **kwargs) -> None:

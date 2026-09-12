@@ -80,7 +80,25 @@ def _patch_managed_uv(request):
 
 @pytest.fixture(autouse=True)
 def _patch_gateway_discovery(isolated_update_runtime):
-    pass
+    """Keep cmd_update's gateway auto-restart phase off this machine's gateways.
+
+    The restart phase used to swallow every exception at debug level, so these
+    end-to-end tests never noticed it touching real gateway discovery. Since
+    the phase is surfaced (#78574: an aborted restart now fails the update),
+    an unmocked ``find_gateway_pids`` on a box with a live gateway reaches the
+    conftest live-system guard and turns into a spurious ``sys.exit(1)``.
+    Discovery returning nothing makes the phase a clean no-op for every test
+    in this module (none of them assert on gateway restarts).
+    """
+    with patch("hermes_cli.gateway.find_gateway_pids", return_value=[]), \
+         patch("hermes_cli.gateway._get_service_pids", return_value=set()), \
+         patch("hermes_cli.gateway.supports_systemd_services", return_value=False), \
+         patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]), \
+         patch("hermes_cli.update_cmd._reload_config_modules"), \
+         patch("hermes_cli.update_cmd._reload_updated_runtime_modules"), \
+         patch("hermes_cli.main._purge_stale_hermes_modules"), \
+         patch("hermes_cli.update_cmd.os.kill"):
+        yield
 
 
 class TestCmdUpdateNpmLockfileCache:

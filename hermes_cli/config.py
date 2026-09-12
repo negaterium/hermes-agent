@@ -2973,6 +2973,16 @@ def _cron_section(config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return cron_config if isinstance(cron_config, dict) else None
 
 
+def cron_model_drift_guard_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether cron must fail closed on unpinned inference drift.
+    Only the literal YAML boolean ``false`` disables this spend-safety guard; missing, malformed,
+    or non-boolean values stay fail-closed. With *config* omitted the merged config is loaded so
+    CLI warnings honor the same user/managed setting as the scheduler.
+    """
+    cron_config = _cron_section(config)
+    return cron_config is None or cron_config.get("model_drift_guard", True) is not False
+
+
 _CRON_MODEL_IMPACT_JOB_LIMIT = 50
 _CRON_MODEL_IMPACT_ID_LIMIT = 256
 _CRON_MODEL_IMPACT_NAME_LIMIT = 120
@@ -3002,9 +3012,8 @@ def resolve_cron_model_drift_defaults(
 def cron_model_drift_axes(
     job: Any, *, current_provider: Any = "", current_model: Any = "", config: Any = None
 ) -> List[str]:
-    """Return the unpinned axes on which *job* will keep running on its creation snapshot rather
-    than the new global assignment (the scheduler treats the snapshot as the effective pin)."""
-    if not isinstance(job, dict):
+    """Return the unpinned axes that the fail-closed cron guard would block."""
+    if not isinstance(job, dict) or not cron_model_drift_guard_enabled(config):
         return []
 
     current = {
@@ -3043,28 +3052,36 @@ def _cron_impact_job_name(value: Any, job_id: str) -> str:
     return f"Job {job_id}"[:_CRON_MODEL_IMPACT_NAME_LIMIT].rstrip()
 
 
-def _cron_model_impact_result(available: bool) -> Dict[str, Any]:
-    return {"available": available, "affected_count": 0, "truncated": False, "jobs": []}
+def _cron_model_impact_result(available: bool, guard_enabled: bool) -> Dict[str, Any]:
+    return {
+        "available": available,
+        "guard_enabled": guard_enabled,
+        "affected_count": 0,
+        "truncated": False,
+        "jobs": []}
 
 
 def build_cron_model_impact(
     *, current_provider: Any = "", current_model: Any = "", config: Any = None, jobs: Any = None
 ) -> Dict[str, Any]:
-    """Build a bounded, profile-local summary of unpinned jobs that stay on their creation snapshot
-    after a global model/provider change. Job-store inspection is best effort: the model assignment
-    has already succeeded when Desktop requests this, so an unreadable store is reported as
-    unavailable rather than failing."""
+    """Build a bounded, profile-local summary of jobs blocked by model drift.
+    Job-store inspection is best effort: the model assignment has already succeeded when Desktop
+    requests this, so an unreadable store is reported as unavailable rather than failing.
+    """
+    guard_enabled = cron_model_drift_guard_enabled(config)
     if jobs is None:
         try:
             from cron.jobs import load_jobs
 
             jobs = load_jobs()
         except Exception:
-            return _cron_model_impact_result(False)
+            return _cron_model_impact_result(False, guard_enabled)
     if not isinstance(jobs, list):
-        return _cron_model_impact_result(False)
+        return _cron_model_impact_result(False, guard_enabled)
 
-    result = _cron_model_impact_result(True)
+    result = _cron_model_impact_result(True, guard_enabled)
+    if not guard_enabled:
+        return result
 
     from cron.jobs import is_job_runnable
 
@@ -3093,7 +3110,7 @@ def build_cron_model_impact(
 
 def warn_unpinned_cron_jobs_after_model_config_change(
     key: str, value: Any, config: Optional[Dict[str, Any]] = None) -> None:
-    """Tell the operator which unpinned cron jobs a global model/provider change does NOT move."""
+    """Warn when a global model/provider change will trip cron's drift guard."""
     axis = _cron_model_drift_axis_for_config_key(key)
     if axis is None:
         return
@@ -3108,12 +3125,13 @@ def warn_unpinned_cron_jobs_after_model_config_change(
     if affected <= 0:
         return
 
-    noun, verb = ("job", "keeps") if affected == 1 else ("jobs", "keep")
+    noun, verb = ("job", "has") if affected == 1 else ("jobs", "have")
     print(
-        f"ℹ️  {affected} unpinned cron {noun} {verb} running on the {axis} it was created under "
-        f"(its {axis}_snapshot), not the new global {axis}. To move it, pin it with "
-        "`hermes cron edit <job_id> --provider <provider> --model <model>` or set a fleet default "
-        "with `hermes config set cron.model <model>`.")
+        f"⚠️  {affected} enabled unpinned cron {noun} {verb} stored "
+        f"{axis}_snapshot values that differ from the new global {axis}. "
+        "They will fail closed on their next run instead of silently using the changed "
+        "model/provider. Inspect with `hermes cron list`, then pin the intended values with "
+        "`hermes cron edit <job_id> --provider <provider> --model <model>`." )
 
 
 def _default_value_for_key(dotted_key: str):

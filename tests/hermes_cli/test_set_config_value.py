@@ -9,6 +9,7 @@ import pytest
 
 from hermes_cli.config import (
     config_command,
+    cron_model_drift_guard_enabled,
     set_config_value,
 )
 
@@ -321,9 +322,9 @@ def _write_cron_jobs(tmp_path, jobs):
 
 
 class TestCronModelChangeNotice:
-    """A global model change tells the operator which unpinned jobs stay on their snapshot."""
+    """A global model change tells the operator which unpinned jobs fail closed."""
 
-    def test_notice_says_jobs_keep_running_and_names_the_user_owned_pin_path(
+    def test_notice_names_the_user_owned_pin_path_and_fail_closed_behavior(
         self,
         _isolated_hermes_home,
         capsys,
@@ -343,10 +344,52 @@ class TestCronModelChangeNotice:
         set_config_value("model.default", "new-model")
 
         notice = capsys.readouterr().out
-        assert "keeps running" in notice
-        assert "fail closed" not in notice
+        assert "has stored" in notice
+        assert "fail closed" in notice
         assert "hermes cron edit <job_id> --provider <provider> --model <model>" in notice
         assert "cronjob action=update" not in notice
+
+    def test_explicit_opt_out_suppresses_warning(
+        self,
+        _isolated_hermes_home,
+        capsys,
+    ):
+        _write_cron_jobs(
+            _isolated_hermes_home,
+            [
+                {
+                    "id": "model-drift-job",
+                    "enabled": True,
+                    "model": None,
+                    "model_snapshot": "old-model",
+                }
+            ],
+        )
+
+        set_config_value("cron.model_drift_guard", "false")
+        capsys.readouterr()
+        set_config_value("model.default", "new-model")
+
+        import yaml
+        reloaded = yaml.safe_load(_read_config(_isolated_hermes_home))
+        captured = capsys.readouterr()
+        assert reloaded["cron"]["model_drift_guard"] is False
+        assert "Set model.default = new-model" in captured.out
+        assert "fail closed" not in captured.out
+
+    @pytest.mark.parametrize(
+        ("configured_value", "expected"),
+        [
+            (False, False),
+            (True, True),
+            ("false", True),
+            (0, True),
+            (None, True),
+        ],
+    )
+    def test_only_literal_false_disables_guard(self, configured_value, expected):
+        config = {"cron": {"model_drift_guard": configured_value}}
+        assert cron_model_drift_guard_enabled(config) is expected
 
 
 # ---------------------------------------------------------------------------

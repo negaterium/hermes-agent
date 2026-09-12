@@ -56,6 +56,30 @@ def test_faster_whisper_is_not_a_base_dependency():
     assert any(dep.startswith("faster-whisper") for dep in voice_extra)
 
 
+def test_darkserver_image_persists_github_auth_outside_container_layer():
+    """Rebuilds must retain the GitHub credential path used for fork promotion."""
+    dockerfile = (REPO_ROOT / "Dockerfile.darkserver").read_text(encoding="utf-8")
+
+    assert "curl git gh bash" in dockerfile
+    assert 'ENV GH_CONFIG_DIR="/root/.hermes/gh"' in dockerfile
+    assert "credential.https://github.com.helper" in dockerfile
+    assert "gh auth git-credential" in dockerfile
+
+
+def test_darkserver_image_has_native_node_build_toolchain():
+    """The production image must be able to compile node-pty when no prebuild exists."""
+    dockerfile = (REPO_ROOT / "Dockerfile.darkserver").read_text(encoding="utf-8")
+
+    assert "build-essential" in dockerfile
+
+
+def test_darkserver_image_bakes_hindsight_client_pin():
+    """The sealed DarkServer image must carry the active Hindsight client pin."""
+    dockerfile = (REPO_ROOT / "Dockerfile.darkserver").read_text(encoding="utf-8")
+
+    assert "uv pip install hindsight-client==0.9.2" in dockerfile
+
+
 # Minimum non-vulnerable Starlette: CVE-2026-48710 ("BadHost") was fixed in
 # 1.0.1. Anything below that lets a malformed Host header desync
 # ``request.url.path`` from the dispatched ASGI path, bypassing path-based

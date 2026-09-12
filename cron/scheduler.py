@@ -38,7 +38,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import (
-    _expand_env_vars, load_config, resolve_cron_model_drift_defaults)
+    _expand_env_vars, cron_model_drift_axes, cron_model_drift_guard_enabled, load_config,
+    resolve_cron_model_drift_defaults)
 from hermes_cli.fallback_config import get_fallback_chain
 from hermes_time import now as _hermes_now
 from agent.interrupt_compat import request_hard_interrupt
@@ -46,6 +47,44 @@ from agent.delegation_context import (
     enter_non_dispatcher_owned_context, exit_non_dispatcher_owned_context)
 
 logger = logging.getLogger(__name__)
+
+
+# Marker for an agent turn that reached its iteration budget before terminal
+# completion. The firing path records this as ``last_status='partial'`` rather
+# than treating a non-empty fallback response as a successful run.
+PARTIAL_RUN_MARKER = "[partial]"
+
+# Marker for an explicit publication refusal. A response whose first non-empty
+# line is ``BLOCKED`` is an operational failure, not a successful publication.
+BLOCKED_RUN_MARKER = "[blocked]"
+
+
+def _is_explicit_blocked_response(response: str) -> bool:
+    """Return whether *response* starts with the cron ``BLOCKED`` status."""
+    first_line = next(
+        (line.strip() for line in str(response or "").splitlines() if line.strip()),
+        "",
+    )
+    return first_line.upper() in {"BLOCKED", "[BLOCKED]"}
+
+
+def _has_cron_error_marker(error: object, marker: str) -> bool:
+    """Recognize a scheduler marker only at the start of the error.
+
+    ``run_job`` wraps raised markers as ``RuntimeError: [marker] ...``. A
+    provider error mentioning ``[partial]`` or ``[blocked]`` in ordinary text
+    must remain an ordinary failure and must not alter its persisted status.
+    """
+    text = str(error or "").strip()
+    if text.startswith(marker):
+        return True
+    separator = text.find(":")
+    if separator <= 0:
+        return False
+    return (
+        text[:separator].strip() == "RuntimeError"
+        and text[separator + 1 :].lstrip().startswith(marker)
+    )
 
 
 def _close_late_session_db_result(future: "concurrent.futures.Future") -> None:
@@ -1484,34 +1523,42 @@ def _preflight_or_block(job: dict, job_id: str, job_name: str, cfg: dict) -> Opt
     return False, blocked_doc, "", f"{marker} {_pf_reason}"
 
 
-def _resolve_job_runtime(job: dict, job_id: str, jc: _CronJobConfig) -> tuple[dict, str]:
+def _resolve_job_runtime(
+    job: dict, job_id: str, jc: _CronJobConfig,
+) -> tuple[dict, str, Optional[str]]:
     """Resolve the runtime, walking the fallback chain on auth/transient-network errors. Returns
-    ``(runtime, model)``; provider+model swap atomically (never swap only the provider while keeping
-    a paid primary model). Provider precedence: per-job pin > cron.model_provider > creation
-    snapshot > persisted global config."""
+    ``(runtime, model, primary_provider_for_drift)``; provider+model swap atomically (never swap
+    only the provider while keeping a paid primary model)."""
     from hermes_cli.runtime_provider import (
         resolve_runtime_provider, format_runtime_provider_error)
     from hermes_cli.auth import AuthError
 
     model = jc.model
-    requested = job.get("provider") or jc.cron_default_provider or None
-    if not requested:
-        global_provider = (
-            str(jc.model_cfg.get("provider") or "").strip() if isinstance(jc.model_cfg, dict) else "")
-        # None (not the config provider) keeps the legacy no-snapshot path resolving from persisted
-        # config exactly as before.
-        requested = _snapshot_pin(job, "provider", global_provider, job_id) or None
+    configured_provider_for_drift = (
+        str(jc.model_cfg.get("provider") or "").strip().lower()
+        if isinstance(jc.model_cfg, dict)
+        else ""
+    )
+    primary_provider_for_drift = (
+        str(job.get("provider") or "").strip().lower()
+        or configured_provider_for_drift
+        or None
+    )
     try:
         # Do NOT pass HERMES_INFERENCE_PROVIDER as `requested`: it would override persisted config
         # and resurrect stale providers for unpinned jobs.
         runtime_kwargs = {
-            "requested": requested,
+            "requested": job.get("provider") or jc.cron_default_provider or None,
             # api_mode must derive from the model actually run, not the stale persisted default.
             "target_model": model,
         }
         if job.get("base_url"):
             runtime_kwargs["explicit_base_url"] = job.get("base_url")
-        return resolve_runtime_provider(**runtime_kwargs), model
+        runtime = resolve_runtime_provider(**runtime_kwargs)
+        primary_provider_for_drift = (
+            str(runtime.get("provider") or "").strip().lower() or primary_provider_for_drift
+        )
+        return runtime, model, primary_provider_for_drift
     except Exception as resolve_exc:
         # Walk the fallback chain on AuthError AND transient network/DNS failures (e.g. during
         # OAuth refresh); anything else re-raises.
@@ -1520,6 +1567,10 @@ def _resolve_job_runtime(job: dict, job_id: str, jc: _CronJobConfig) -> tuple[di
         if not (is_auth or is_transient_net):
             raise RuntimeError(format_runtime_provider_error(resolve_exc)) from resolve_exc
 
+        primary_provider_for_drift = (
+            str(getattr(resolve_exc, "provider", "") or "").strip().lower()
+            or primary_provider_for_drift
+        )
         logger.warning(
             "Job '%s': primary provider resolve failed (%s: %s), trying fallback",
             job_id, "auth" if is_auth else "transient network", resolve_exc)
@@ -1543,10 +1594,72 @@ def _resolve_job_runtime(job: dict, job_id: str, jc: _CronJobConfig) -> tuple[di
                 logger.info(
                     "Job '%s': fallback resolved to %s model %s",
                     job_id, runtime.get("provider"), fb_model)
-                return runtime, fb_model
+                return runtime, fb_model, primary_provider_for_drift
             except Exception as fb_exc:
                 logger.debug("Job '%s': fallback %s failed: %s", job_id, fb_provider, fb_exc)
         raise RuntimeError(format_runtime_provider_error(resolve_exc)) from resolve_exc
+
+
+def _check_model_drift(
+    job: dict, job_id: str, cfg: dict, runtime: dict,
+    primary_provider_for_drift: Optional[str], primary_model_for_drift: str,
+) -> None:
+    """Fail-closed provider/model drift guard; raises RuntimeError (with drift marker) on drift.
+    An unpinned job follows the global default, which may have switched to a paid provider/model:
+    each unpinned axis whose creation snapshot (job["<axis>_snapshot"]) now resolves differently
+    skips the run and alerts to pin. No snapshot, pinned axes, or the cron.model fleet default
+    never count as drift.
+    """
+    if not cron_model_drift_guard_enabled(cfg):
+        return
+    _current_provider = str(
+        primary_provider_for_drift or runtime.get("provider") or ""
+    ).strip().lower()
+    _current_model = str(primary_model_for_drift or "").strip().lower()
+    _drift: list[str] = []
+    for _axis in cron_model_drift_axes(
+        job, current_provider=_current_provider, current_model=_current_model, config=cfg):
+        _snapshot = str(job.get(f"{_axis}_snapshot") or "").strip().lower()
+        _current = _current_provider if _axis == "provider" else _current_model
+        _drift.append(f"{_axis} '{_snapshot}' -> '{_current}'")
+    if not _drift:
+        return
+    _changes = "; ".join(_drift)
+    _repeat = job.get("repeat") if isinstance(job.get("repeat"), dict) else {}
+    _finite_oneshot = (
+        isinstance(job.get("schedule"), dict)
+        and job["schedule"].get("kind") == "once"
+        and _repeat.get("times") == 1
+    )
+    if _finite_oneshot:
+        _remediation = (
+            "This finite one-shot job is consumed by this attempted run; "
+            "create a new one-shot job at a future time with an explicit provider and model."
+        )
+    else:
+        _remediation = (
+            "To run on the new config, on the host running Hermes pin it explicitly: "
+            f"`hermes cron edit {job_id} --provider <provider> "
+            "--model <model>` (or pin the original values to keep them)."
+        )
+    logger.warning(
+        "Job '%s': SKIPPED — global inference config drifted since "
+        "creation (%s) and this job is unpinned. Skipped to prevent unintended spend. %s",
+        job_id, _changes, _remediation)
+    _drift_already_alerted = False
+    with contextlib.suppress(Exception):
+        from cron.jobs import mark_drift_alerted
+
+        _drift_already_alerted = mark_drift_alerted(job_id)
+    _drift_marker = DRIFT_SKIP_SILENT_MARKER if _drift_already_alerted else DRIFT_SKIP_MARKER
+    raise RuntimeError(
+        f"{_drift_marker} Skipped to prevent unintended spend: global "
+        f"inference config drifted since this job was created "
+        f"({_changes}), and this job is unpinned. No inference call "
+        f"was made. {_remediation} "
+        f"This alert is sent once; the job stays skipped until the "
+        f"config is pinned or restored. See #44585."
+    )
 
 
 def _load_credential_pool(runtime: dict, job_id: str):
@@ -1780,10 +1893,10 @@ def _final_response_from_result(result: dict, job_id: str, job_name: str, AIAgen
     if result.get("failed") is True or (result.get("completed") is False and not max_iteration_summary):
         raise RuntimeError(result.get("error") or final_response_text or "agent reported failure")
     if max_iteration_summary:
-        logger.warning(
-            "Job '%s' reached the iteration limit but produced a final fallback response; "
-            "delivering the response instead of failing the cron run",
-            job_name)
+        raise RuntimeError(
+            f"{PARTIAL_RUN_MARKER} Agent reached the iteration limit before "
+            f"terminal completion: {turn_exit_reason}"
+        )
 
     final_response = result.get("final_response", "") or ""
     # Repair model-mangled computer_use media paths before delivery (fail-open, as in gateway).
@@ -2116,7 +2229,7 @@ class _CronAgentSetup:
 
 def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _CronAgentSetup:
     """Resolve model/runtime/reasoning/pool for the run, in the original gate order: exfil guard ->
-    preflight (may block) -> runtime (+ fallback chain) -> credential pool -> MCP."""
+    preflight (may block) -> runtime -> drift check -> fallback chain -> credential pool -> MCP."""
     _cfg = jc.cfg
     setup = _CronAgentSetup(model=jc.model)
     setup.prefill_messages = _load_prefill_messages(_cfg, job_id)
@@ -2136,10 +2249,13 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
     if setup.blocked is not None:
         return setup
 
-    setup.runtime, setup.model = _resolve_job_runtime(job, job_id, jc)
+    primary_model_for_drift = setup.model
+    setup.runtime, setup.model, primary_provider_for_drift = _resolve_job_runtime(job, job_id, jc)
     setup.reasoning_config = _resolve_job_reasoning_config(
         job, _cfg if isinstance(_cfg, dict) else {}, str(setup.model)
     )
+    _check_model_drift(
+        job, job_id, _cfg, setup.runtime, primary_provider_for_drift, primary_model_for_drift)
     setup.fallback_model = get_fallback_chain(_cfg) or None
     setup.credential_pool = _load_credential_pool(setup.runtime, job_id)
     # MCP servers must be registered before AIAgent is constructed.
@@ -2284,9 +2400,14 @@ def run_job(
         if _audit is not None:
             _audit.write({}, error_msg)
         from cron.scheduler_diagnostics import format_run_error
+        partial_run = _has_cron_error_marker(error_msg, PARTIAL_RUN_MARKER)
+        status_label = "PARTIAL" if partial_run else "FAILED"
+        error_document = format_run_error(e)
+        if partial_run:
+            error_document = error_document.replace(PARTIAL_RUN_MARKER, "", 1)
         output = (
-            _run_doc_header(job, f"{job_name} (FAILED)", job_id, prompt)
-            + format_run_error(e)
+            _run_doc_header(job, f"{job_name} ({status_label})", job_id, prompt)
+            + error_document
         )
         return False, output, "", error_msg
 
@@ -2527,17 +2648,32 @@ def _classify_delivery_outcome(
 
 def _compose_run_delivery(
     job: dict, *, success: bool, error, final_response: str, output_file,
-) -> tuple[str, bool, bool, bool, Optional[str]]:
-    """Text to deliver for a finished run. Returns ``(deliver_content, blocked_config,
-    silent_alert, incident_acked, failure_incident_id)``; ``silent_alert``: an alert-once marker
-    says the operator was already told, deliver nothing."""
+) -> tuple[str, bool, bool, bool, Optional[str], bool, bool]:
+    """Text to deliver for a finished run.
+
+    Returns ``(deliver_content, blocked_config, silent_alert, incident_acked,
+    failure_incident_id, blocked_run, partial_run)``. ``silent_alert`` means
+    an alert-once marker says the operator was already told, so delivery is
+    suppressed.
+    """
     err = str(error) if error else ""
-    # Failed jobs always deliver, except blocked-config runs, which alert exactly ONCE.
-    blocked_config_silent = BLOCKED_CONFIG_SILENT_MARKER in err
-    blocked_config = blocked_config_silent or BLOCKED_CONFIG_MARKER in err
+    # Failed jobs always deliver, except blocked-config / drift-skip runs, which alert exactly ONCE.
+    blocked_config_silent = _has_cron_error_marker(err, BLOCKED_CONFIG_SILENT_MARKER)
+    blocked_config = blocked_config_silent or _has_cron_error_marker(err, BLOCKED_CONFIG_MARKER)
+    drift_skip_silent = _has_cron_error_marker(err, DRIFT_SKIP_SILENT_MARKER)
+    drift_skip = drift_skip_silent or _has_cron_error_marker(err, DRIFT_SKIP_MARKER)
+    blocked_run = _has_cron_error_marker(err, BLOCKED_RUN_MARKER)
+    partial_run = _has_cron_error_marker(err, PARTIAL_RUN_MARKER)
     incident_acked = False
     failure_incident_id = None
-    if blocked_config and not success:
+    clean_error = err
+    for marker in (BLOCKED_RUN_MARKER, PARTIAL_RUN_MARKER):
+        if _has_cron_error_marker(clean_error, marker):
+            clean_error = clean_error.replace(marker, "", 1).strip()
+    if blocked_run and not success:
+        # Publication jobs return their own concise, auditable status report.
+        deliver_content = final_response.strip() or clean_error
+    elif blocked_config and not success:
         # Bypass the generic failure summarizer (its auth/timeout heuristics would mislabel this).
         _pf_text = re.sub(r"\[blocked_config[^\]]*\]\s*", "", err).strip()
         deliver_content = (
@@ -2558,9 +2694,16 @@ def _compose_run_delivery(
             deliver_content = ""
         else:
             deliver_content = (
-                _summarize_cron_failure_for_delivery(job, error) + _failure_streak_nudge(job)
+                _summarize_cron_failure_for_delivery(job, clean_error) + _failure_streak_nudge(job)
             )
-    return deliver_content, blocked_config, blocked_config_silent, incident_acked, failure_incident_id
+        if drift_skip:
+            # Deliver the guard's message intact (summarizer truncation would eat the remediation
+            # command). NOT gated on incident ack: acks silence failure pings, not drift alerts.
+            _drift_text = re.sub(r"\[drift_skip[^\]]*\]\s*", "", err).strip()
+            deliver_content = f"⚠️ Cron '{job.get('name') or job['id']}' skipped: {_drift_text}"
+    return (
+        deliver_content, blocked_config, blocked_config_silent or drift_skip_silent,
+        incident_acked, failure_incident_id, blocked_run, partial_run)
 
 
 class _FireClaimLostDuringSideEffect(Exception):
@@ -2609,6 +2752,8 @@ class _RunDelivery:
     should_deliver: bool = False
     unresolved_origin: bool = False
     blocked_config: bool = False
+    blocked_run: bool = False
+    partial_run: bool = False
     incident_acked: bool = False
     failure_incident_id: Optional[str] = None
     side_effect_ownership_lost: bool = False
@@ -2637,11 +2782,25 @@ def _save_compose_deliver(
             "(tool subprocess was killed mid-flight)."
         )
 
+    if d.success and _is_explicit_blocked_response(final_response):
+        d.success = False
+        d.error = f"{BLOCKED_RUN_MARKER} {final_response.strip()}"
+
     (
-        deliver_content, d.blocked_config, _silent_alert, d.incident_acked, d.failure_incident_id,
+        deliver_content,
+        d.blocked_config,
+        _silent_alert,
+        d.incident_acked,
+        d.failure_incident_id,
+        d.blocked_run,
+        d.partial_run,
     ) = _compose_run_delivery(
         job, success=d.success, error=d.error, final_response=final_response,
         output_file=output_file)
+    if d.partial_run and d.error:
+        d.error = str(d.error).replace(PARTIAL_RUN_MARKER, "", 1).strip()
+    if d.blocked_run and d.error:
+        d.error = str(d.error).replace(BLOCKED_RUN_MARKER, "", 1).strip()
     # Whitespace-only == empty: skip delivery; the guard below marks it a soft failure.
     d.should_deliver = bool(deliver_content.strip()) and not _silent_alert
     # Not a substring check: bare "SILENT"/"NO_REPLY" or a report quoting "[SILENT]" must
@@ -2718,6 +2877,10 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
         mark_kwargs["expected_fire_owner"] = fire_owner
     if d.blocked_config:
         mark_kwargs["status"] = "blocked_config"
+    elif d.blocked_run:
+        mark_kwargs["status"] = "blocked"
+    elif d.partial_run:
+        mark_kwargs["status"] = "partial"
     marked = mark_job_run(job["id"], d.success, d.error, **mark_kwargs)
     if fire_owner is not None and not marked:
         finish_execution(
@@ -3768,6 +3931,7 @@ def tick(
 # ---------------------------------------------------------------------------
 from cron.scheduler_delivery import (  # noqa: E402
     _deliver_result, _delivery_lane_value, _normalize_deliver_value, _resolve_delivery_target,
+    _resolve_origin,
     _resolve_delivery_targets,
 )
 from cron.scheduler_script import (  # noqa: E402
@@ -3777,7 +3941,8 @@ from cron.scheduler_prompt import (  # noqa: E402
     _block_and_pause_job, _build_job_prompt, _guard_job_credential_exfil, _parse_wake_gate,
 )
 from cron.scheduler_preflight import (  # noqa: E402
-    BLOCKED_CONFIG_MARKER, BLOCKED_CONFIG_SILENT_MARKER, _cron_preflight_enabled,
+    BLOCKED_CONFIG_MARKER, BLOCKED_CONFIG_SILENT_MARKER, DRIFT_SKIP_MARKER,
+    DRIFT_SKIP_SILENT_MARKER, _cron_preflight_enabled,
     _is_transient_provider_resolve_error, _preflight_job_config,
 )
 
