@@ -452,7 +452,7 @@ def test_exclude_removes_named_file_from_discovery(tmp_path: Path) -> None:
         "    raise AssertionError('excluded probe executed')\n",
         encoding="utf-8",
     )
-    repo_root = Path(__file__).resolve().parent.parent
+    repo_root = Path(__file__).resolve().parent.parent.parent
     runner = repo_root / "scripts" / "run_tests_parallel.py"
     proc = subprocess.run(
         [
