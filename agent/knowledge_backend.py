@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 
@@ -14,7 +15,10 @@ class QmdKnowledgeBackend:
 
     _MODE_TO_SUBCOMMAND = {
         "keyword": "search",
-        "semantic": "vsearch",
+        # A structured vec query bypasses QMD's local LLM query-expansion
+        # model.  Recall remains semantic, but the normal Hermes path does
+        # not need to load a 1.7B generator for every lookup.
+        "semantic": "query",
         "hybrid": "query",
     }
 
@@ -73,15 +77,24 @@ class QmdKnowledgeBackend:
         return result
 
     def _search_with_mode(self, query: str, limit: int, mode: str) -> Dict[str, Any]:
+        search_query = query
+        search_options: List[str] = []
+        if mode == "semantic":
+            # QMD's structured endpoint accepts a single-line vec query and
+            # skips its own expansion pass.  Normalize multiline user input
+            # so a query cannot accidentally become malformed QMD syntax.
+            search_query = f"vec: {query.replace(chr(10), ' ').replace(chr(13), ' ')}"
+            search_options.append("--no-rerank")
         cmd = [
             "qmd",
             self._MODE_TO_SUBCOMMAND[mode],
-            query,
+            search_query,
             "-c",
             self.collection,
             "-n",
             str(limit),
             "--json",
+            *search_options,
         ]
         result = self._run_command(cmd, timeout=self._COMMAND_TIMEOUTS.get(mode, 15))
         if result["success"] is False:
@@ -126,7 +139,7 @@ class QmdKnowledgeBackend:
                 capture_output=True,
                 text=True,
                 check=False,
-                env=os.environ.copy(),
+                env=self._qmd_environment(),
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:
@@ -140,6 +153,22 @@ class QmdKnowledgeBackend:
             detail = stderr or stdout or f"exit code {completed.returncode}"
             return {"success": False, "error": f"qmd command failed: {detail}"}
         return {"success": True, "stdout": stdout, "stderr": stderr}
+
+    @staticmethod
+    def _qmd_environment() -> Dict[str, str]:
+        """Map Hermes' persistent QMD path to QMD's XDG path contract."""
+        env = os.environ.copy()
+        data_dir = env.get("QMD_DATA_DIR", "").strip()
+        if not data_dir:
+            return env
+
+        data_path = Path(os.path.abspath(os.path.expanduser(data_dir)))
+        root = data_path.parent if data_path.name == "qmd" else data_path
+        # Preserve explicit operator overrides, while making QMD_DATA_DIR
+        # useful with stock QMD, which does not read that variable itself.
+        env.setdefault("XDG_CACHE_HOME", os.fspath(root))
+        env.setdefault("XDG_CONFIG_HOME", os.fspath(root))
+        return env
 
     @staticmethod
     def _parse_json_output(stdout: str) -> Any:

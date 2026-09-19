@@ -37,14 +37,16 @@ def test_search_hybrid_falls_back_to_semantic_on_timeout():
 
     def fake_run(cmd, **_kwargs):
         calls.append(cmd)
-        if cmd[1] == "query":
+        if cmd[1] == "query" and not cmd[2].startswith("vec: "):
             raise subprocess.TimeoutExpired(cmd="qmd query", timeout=25)
         return _Result(stdout='[{"id":"qmd://obsidian/fallback.md","title":"Fallback"}]')
 
     backend = QmdKnowledgeBackend(which=lambda _name: "/usr/bin/qmd", runner=fake_run)
     result = backend.search("vault memory", limit=5, mode="hybrid")
 
-    assert [call[1] for call in calls] == ["query", "vsearch"]
+    assert [call[1] for call in calls] == ["query", "query"]
+    assert calls[1][2] == "vec: vault memory"
+    assert "--no-rerank" in calls[1]
     assert result["success"] is True
     assert result["mode"] == "semantic"
     assert result["requested_mode"] == "hybrid"
@@ -63,6 +65,32 @@ def test_search_keyword_mode_uses_qmd_search():
 
     assert calls[0][:3] == ["qmd", "search", "docker"]
     assert result["results"][0]["id"] == "qmd://obsidian/bar.md"
+
+
+def test_search_semantic_uses_direct_vec_query_without_reranking():
+    calls = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        return _Result(stdout='[{"id":"qmd://obsidian/semantic.md"}]')
+
+    backend = QmdKnowledgeBackend(which=lambda _name: "/usr/bin/qmd", runner=fake_run)
+    result = backend.search("vault\nmemory", limit=4, mode="semantic")
+
+    assert calls[0][:3] == ["qmd", "query", "vec: vault memory"]
+    assert "--no-rerank" in calls[0]
+    assert result["mode"] == "semantic"
+
+
+def test_qmd_data_dir_maps_to_xdg_paths(monkeypatch):
+    monkeypatch.setenv("QMD_DATA_DIR", "/srv/hermes/qmd")
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    env = QmdKnowledgeBackend._qmd_environment()
+
+    assert env["XDG_CACHE_HOME"] == "/srv/hermes"
+    assert env["XDG_CONFIG_HOME"] == "/srv/hermes"
 
 
 def test_search_returns_error_on_nonzero_exit():

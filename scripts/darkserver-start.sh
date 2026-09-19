@@ -8,6 +8,16 @@ QMD_COLLECTION_NAME="${QMD_COLLECTION_NAME:-obsidian}"
 QMD_LOG_DIR="${QMD_LOG_DIR:-$HERMES_HOME/logs}"
 QMD_LOG_FILE="${QMD_LOG_FILE:-$QMD_LOG_DIR/qmd-embed.log}"
 QMD_DATA_DIR="${QMD_DATA_DIR:-$HERMES_HOME/qmd}"
+QMD_DATA_ROOT="$(dirname "$QMD_DATA_DIR")"
+# QMD resolves its database/config through XDG locations; QMD_DATA_DIR is a
+# Hermes convention, not a QMD setting.  Keep both stores beside the
+# persistent data directory unless an operator explicitly overrides them.
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$QMD_DATA_ROOT}"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$QMD_DATA_ROOT}"
+QMD_AUTO_EMBED="${QMD_AUTO_EMBED:-0}"
+QMD_EMBED_PARALLELISM="${QMD_EMBED_PARALLELISM:-1}"
+QMD_MAX_DOCS_PER_BATCH="${QMD_MAX_DOCS_PER_BATCH:-32}"
+QMD_MAX_BATCH_MB="${QMD_MAX_BATCH_MB:-8}"
 OBS_SYNC_SCRIPT_SRC="${OBS_SYNC_SCRIPT_SRC:-/app/scripts/obsidian_sync.py}"
 OBS_SYNC_SCRIPT_DST="${OBS_SYNC_SCRIPT_DST:-$HERMES_HOME/scripts/obsidian_sync.py}"
 
@@ -42,8 +52,14 @@ else
     if ! qmd collection list 2>/dev/null | grep -q "$QMD_COLLECTION_NAME"; then
       echo "[darkserver-start] creating qmd collection '$QMD_COLLECTION_NAME' for $VAULT" >&2
       if qmd collection add "$VAULT" --name "$QMD_COLLECTION_NAME" >>"$QMD_LOG_FILE" 2>&1; then
-        echo "[darkserver-start] starting background qmd embed" >&2
-        nohup qmd embed >>"$QMD_LOG_FILE" 2>&1 &
+        if [ "$QMD_AUTO_EMBED" = "1" ]; then
+          echo "[darkserver-start] starting bounded background qmd embed" >&2
+          nohup env QMD_EMBED_PARALLELISM="$QMD_EMBED_PARALLELISM" \
+            qmd embed --max-docs-per-batch "$QMD_MAX_DOCS_PER_BATCH" \
+            --max-batch-mb "$QMD_MAX_BATCH_MB" >>"$QMD_LOG_FILE" 2>&1 &
+        else
+          echo "[darkserver-start] qmd embed deferred to scheduled reindex" >&2
+        fi
       else
         echo "[darkserver-start] WARNING: failed to add qmd collection; see $QMD_LOG_FILE" >&2
       fi
