@@ -79,6 +79,29 @@ def _normalize_retain_tags(value: Any) -> List[str]:
     return normalized
 
 
+def _normalize_recall_tags(value: Any) -> List[str]:
+    """Normalize recall tag config while preserving iterable tag items."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        parsed = None
+        if text.startswith("["):
+            with contextlib.suppress(Exception):
+                parsed = json.loads(text)
+        raw_items = parsed if isinstance(parsed, (list, tuple)) else text.split(",")
+    elif isinstance(value, (list, tuple)):
+        raw_items = value
+    else:
+        raw_items = [value]
+    normalized: list[str] = []
+    for item in raw_items:
+        tag = str(item).strip()
+        if tag and tag not in normalized:
+            normalized.append(tag)
+    return normalized
+
+
 def _normalize_observation_scopes(value: Any) -> Any:
     """Normalize observation_scopes to a keyword string, ``list[list[str]]`` (one inner
     list per consolidation pass), or ``None`` (Hindsight's ``combined`` default).

@@ -26,6 +26,18 @@ def _isolate_update(isolated_update_runtime, monkeypatch):
     monkeypatch.setattr(managed_uv, "ensure_uv", lambda **kw: shutil.which("uv"))
     monkeypatch.setattr(managed_uv, "update_managed_uv", lambda **kw: None)
     monkeypatch.setattr(update_cmd, "_post_update_sqlite_runtime_status", lambda: (True, None))
+    import hermes_cli.gateway as gateway
+
+    monkeypatch.setattr(gateway, "find_gateway_pids", lambda *a, **k: [])
+    monkeypatch.setattr(gateway, "_get_service_pids", lambda: set())
+    monkeypatch.setattr(gateway, "supports_systemd_services", lambda: False)
+    monkeypatch.setattr(gateway, "find_profile_gateway_processes", lambda *a, **k: [])
+    monkeypatch.setattr("hermes_cli.update_cmd.os.kill", lambda *a, **k: None)
+    # Preserve the gateway isolation patches after the simulated pull. The
+    # production purge intentionally evicts cached Hermes modules.
+    monkeypatch.setattr(
+        "hermes_cli.main._purge_stale_hermes_modules", lambda: None
+    )
 
 
 def _make_run_side_effect(

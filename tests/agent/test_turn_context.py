@@ -460,7 +460,8 @@ def test_ensure_db_session_runs_after_system_prompt_restore():
     agent = _FakeAgent()
     agent._cached_system_prompt = None  # fresh agent, no cached prompt yet
 
-    def _restore(_agent, _system_message, _history):
+    def _restore(_agent, _system_message, _history, **kwargs):
+        assert kwargs["skill_query"] == "hello"
         _agent._cached_system_prompt = "REBUILT-SYSTEM"
 
     _build(agent, restore_or_build_system_prompt=_restore)

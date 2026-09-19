@@ -93,7 +93,9 @@ class TestAbiStamp:
 
     def test_readonly_target_reports_error(self, tmp_path):
         # A path under a non-writable parent should surface a clean error,
-        # not raise.
+        # not raise. Root bypasses directory permission bits.
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses directory permission bits")
         ro_parent = tmp_path / "ro"
         ro_parent.mkdir()
         os.chmod(ro_parent, 0o500)
