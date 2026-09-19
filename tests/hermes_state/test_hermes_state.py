@@ -1063,8 +1063,6 @@ class TestFTS5Search:
         # each match. Trace those connections too; tracing only the cached
         # connections makes the assertion report zero queries even though the
         # context was correctly fetched.
-        import contextlib
-
         original_read_ctx = db._read_ctx
 
         @contextlib.contextmanager
