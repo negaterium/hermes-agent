@@ -23,8 +23,6 @@ def _clear():
     clear_cache()
 
 
-
-
 def test_find_git_worktree_finds_dotgit(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -32,12 +30,6 @@ def test_find_git_worktree_finds_dotgit(tmp_path: Path):
     sub = repo / "src" / "deep"
     sub.mkdir(parents=True)
     assert find_git_worktree(str(sub)) == str(repo)
-
-
-
-
-
-
 
 
 def test_nearest_root_finds_first_marker(tmp_path: Path):
@@ -62,10 +54,6 @@ def test_nearest_root_skips_package_dirs(tmp_path: Path):
     assert found == str(root)
 
 
-
-
-
-
 def test_resolve_workspace_for_file_uses_cwd_first(tmp_path: Path, monkeypatch):
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
@@ -78,8 +66,30 @@ def test_resolve_workspace_for_file_uses_cwd_first(tmp_path: Path, monkeypatch):
     assert gated is True
 
 
+def test_resolve_workspace_for_file_survives_deleted_cwd(tmp_path: Path, monkeypatch):
+    """A removed process cwd must read as "no anchor", not raise — the LSP
+    workspace resolver runs inside a write tool and must never break a write
+    that already landed on disk."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    file_path = repo / "x.py"
+    file_path.write_text("")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.chdir(scratch)
+    scratch.rmdir()
+    with pytest.raises(OSError):
+        os.getcwd()
 
+    root, gated = resolve_workspace_for_file(str(file_path))
 
+    assert root == str(repo)
+    assert gated is True
+    # The diagnostics path logs through eventlog; its cwd-relative shortener must
+    # not raise either, or the write succeeds with diagnostics silently dropped.
+    from agent.lsp.eventlog import _short_path
+
+    assert _short_path(str(file_path)) == str(file_path)
 
 
 def test_normalize_path_expands_tilde(monkeypatch):

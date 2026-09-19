@@ -32,7 +32,9 @@ def _short_path(file_path: str) -> str:
         return file_path
     try:
         rel = os.path.relpath(file_path)
-    except ValueError:
+    except (ValueError, OSError):
+        # Different drive (ValueError) or the process cwd was removed (OSError from getcwd):
+        # a log-line shortener must never turn a delivered diagnostic into a swallowed error.
         return file_path
     return file_path if rel.startswith(".." + os.sep) or rel == ".." else rel
 
@@ -114,6 +116,15 @@ def log_reaped(keys: List[Tuple[str, str]], idle_timeout: float) -> None:
         _announced_active.difference_update(keys)
     summary = ", ".join(f"{sid} ({root})" for sid, root in keys)
     _emit("reaper", logging.INFO, f"reaped {len(keys)} idle client(s) after {idle_timeout:.0f}s: {summary}")
+
+
+def log_released(keys: List[Tuple[str, str]], reason: str) -> None:
+    """Clients were shut down because their workspace went away (worktree released or root deleted).
+    INFO, one line per event; forgets the ``log_active`` announcement like :func:`log_reaped`."""
+    with _announce_lock:
+        _announced_active.difference_update(keys)
+    summary = ", ".join(f"{sid} ({root})" for sid, root in keys)
+    _emit("reaper", logging.INFO, f"released {len(keys)} client(s) ({reason}): {summary}")
 
 
 def reset_announce_caches() -> None:

@@ -133,7 +133,14 @@ def resolve_workspace_for_file(file_path: str, *, cwd: Optional[str] = None) -> 
     """Return ``(workspace_root, gated_in)`` for a file.  The cwd's worktree wins when the file is
     inside it; otherwise the file's own worktree is the fallback anchor (monorepos / unrelated
     checkouts).  ``(None, False)`` when neither is in a git worktree."""
-    cwd_root = find_git_worktree(cwd or os.getcwd())
+    try:
+        cwd_anchor = cwd or os.getcwd()
+    except OSError:
+        # The process cwd was removed underneath us (a scratch workspace cleaned up at
+        # card completion); getcwd keeps raising even after the path is recreated, so
+        # there is simply no cwd anchor — fall through to the file's own worktree.
+        cwd_anchor = None
+    cwd_root = find_git_worktree(cwd_anchor) if cwd_anchor else None
     if cwd_root is not None and is_inside_workspace(file_path, cwd_root):
         return cwd_root, True
     file_root = find_git_worktree(file_path)
