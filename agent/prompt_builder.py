@@ -453,12 +453,12 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "differ from what the user profile says about their personal setup.\n"
     "</mandatory_tool_use>\n\n"
     "<act_dont_ask>\n"
-    "When a question has an obvious default interpretation, act on it immediately instead of asking for clarification. "
-    "Examples:\n"
-    "- 'Is port 443 open?' → check THIS machine (don't ask 'open where?')\n"
-    "- 'What OS am I running?' → check the live system (don't use user profile)\n"
-    "- 'What time is it?' → run `date` (don't guess)\n"
-    "Only ask for clarification when the ambiguity genuinely changes what tool you would call.\n"
+    "When a question has an obvious target from the request and conversation, act immediately and state the vantage point when it matters. "
+    "In a container or remote session, verify the named target rather than assuming this process's machine. Examples:\n"
+    "- 'Is port 443 open?' → check the named target; if none is named, inspect this execution environment and say so.\n"
+    "- 'What OS am I running?' → inspect the live execution environment and state its vantage point.\n"
+    "- 'What time is it?' → use an appropriate time tool (don't guess)\n"
+    "Only ask for clarification when unresolved ambiguity changes the target, vantage point, tool, authorization, or result.\n"
     "</act_dont_ask>\n\n"
     "<prerequisite_checks>\n"
     "- Before taking an action, check whether prerequisite discovery, lookup, or context-gathering steps are needed.\n"
@@ -490,8 +490,7 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "</literal_preservation>\n\n"
     "<missing_context>\n"
     "- If required context is missing, do NOT guess or hallucinate an answer.\n"
-    "- Use the appropriate permitted lookup tool when missing information is retrievable (search_files, read_file, "
-    "or an available retrieval/search tool).\n"
+    "- Use an appropriate permitted lookup or retrieval tool when missing information is retrievable.\n"
     "- Ask a clarifying question only when the information cannot be retrieved by tools.\n"
     "- If you must proceed with incomplete information, label assumptions explicitly.\n"
     "</missing_context>"
@@ -518,9 +517,9 @@ def build_openai_model_execution_guidance(
     available_tools: Optional[Collection[str]] = None,
 ) -> str:
     """Return GPT/Codex execution guidance trimmed to the live tool surface."""
-    tools = _normalize_tool_name_set(available_tools)
-    if not tools:
+    if available_tools is None:
         return OPENAI_MODEL_EXECUTION_GUIDANCE
+    tools = _normalize_tool_name_set(available_tools)
 
     has_terminal = "terminal" in tools
     has_execute_code = "execute_code" in tools
@@ -548,6 +547,10 @@ def build_openai_model_execution_guidance(
         mandatory_lines.append("- File contents, sizes, line counts → use " + ", ".join(file_tools))
     if has_web_search:
         mandatory_lines.append("- Current facts (weather, news, versions) → use web_search")
+    lookup_tools = [
+        name for name in ("read_file", "search_files", "web_search", "web_extract", "knowledge_search", "terminal", "execute_code")
+        if name in tools
+    ]
 
     sections = [
         "# Execution discipline\n"
@@ -569,18 +572,20 @@ def build_openai_model_execution_guidance(
     if has_terminal:
         sections.append(
             "<act_dont_ask>\n"
-            "When a question has an obvious default interpretation, act immediately instead of asking. Examples:\n"
-            "- 'Is port 443 open?' → check THIS machine (don't ask 'open where?')\n"
-            "- 'What OS am I running?' → check the live system (don't use user profile)\n"
+            "When a question has an obvious target from the request and conversation, act immediately and state the vantage point when it matters. "
+            "In a container or remote session, verify the named target rather than assuming this process's machine. Examples:\n"
+            "- 'Is port 443 open?' → check the named target; if none is named, inspect this execution environment and say so.\n"
+            "- 'What OS am I running?' → inspect the live execution environment and state its vantage point.\n"
             "- 'What time is it?' → run `date` (don't guess)\n"
-            "Only clarify when the ambiguity changes the tool to call.\n"
+            "Only clarify when unresolved ambiguity changes the target, vantage point, tool, authorization, or result.\n"
             "</act_dont_ask>"
         )
     else:
         sections.append(
             "<act_dont_ask>\n"
-            "When a question has an obvious default interpretation, act immediately instead of asking.\n"
-            "Only clarify when the ambiguity changes the tool to call.\n"
+            "When a question has an obvious target from the request and conversation, act immediately and state the vantage point when it matters.\n"
+            "In a container or remote session, verify the named target rather than assuming this process's machine.\n"
+            "Only clarify when unresolved ambiguity changes the target, vantage point, tool, authorization, or result.\n"
             "</act_dont_ask>"
         )
     sections.extend([
@@ -598,8 +603,13 @@ def build_openai_model_execution_guidance(
         "</verification>",
         "<missing_context>\n"
         "- If required context is missing, do NOT guess or hallucinate an answer.\n"
-        "- Use the appropriate lookup tool when the information is retrievable (search_files, web_search, read_file, etc.).\n"
-        "- Ask a clarifying question only when the information cannot be retrieved by tools.\n"
+        + (
+            "- Use the appropriate available lookup tool when missing information is retrievable ("
+            + ", ".join(lookup_tools) + ").\n"
+            if lookup_tools else
+            "- If required context is missing and no permitted lookup tool is available, state the gap or ask for the missing input.\n"
+        )
+        + "- Ask a clarifying question only when the information cannot be retrieved by available tools.\n"
         "- If you must proceed with incomplete information, label assumptions explicitly.\n"
         "</missing_context>",
     ])

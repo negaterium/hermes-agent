@@ -15,14 +15,16 @@ KNOWLEDGE_SEARCH_SCHEMA = {
     "description": (
         "Search your local knowledge base and notes. Use this for Obsidian vault notes, "
         "research docs, and other indexed local knowledge sources. This searches local "
-        "knowledge only — it does not search the web."
+        "knowledge only — it does not search the web. Use a natural-language query for "
+        "semantic recall; an exact collection-relative Markdown path or qmd:// ref is "
+        "also accepted and resolved within the configured collection."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "Search query for the local knowledge base.",
+                "description": "Natural-language search query, exact collection-relative Markdown path, or qmd:// document ref.",
             },
             "limit": {
                 "type": "integer",
@@ -43,7 +45,7 @@ KNOWLEDGE_SEARCH_SCHEMA = {
 
 KNOWLEDGE_READ_SCHEMA = {
     "name": "knowledge_read",
-    "description": "Read a specific local knowledge-base document by qmd ref/path.",
+    "description": "Read a specific local knowledge-base document using the `file` ref returned by knowledge_search (qmd:// URI).",
     "parameters": {
         "type": "object",
         "properties": {

@@ -29,6 +29,7 @@ from agent.prompt_builder import (
     _CONTEXT_FILE_DYNAMIC_CEILING,
     DEFAULT_AGENT_IDENTITY,
     drain_truncation_warnings,
+    build_openai_model_execution_guidance,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
     OPENAI_MODEL_EXECUTION_GUIDANCE,
@@ -1206,6 +1207,28 @@ class TestOpenAIModelExecutionGuidance:
     def test_guidance_gates_completion_on_verification(self):
         text = OPENAI_MODEL_EXECUTION_GUIDANCE.lower()
         assert "plausible subset" in text
+
+    def test_capability_aware_missing_context_does_not_name_unavailable_web_tool(self):
+        text = build_openai_model_execution_guidance({"read_file", "search_files"})
+        assert "web_search" not in text
+        assert "read_file" in text
+        assert "search_files" in text
+
+    def test_explicitly_empty_tool_surface_is_tool_neutral(self):
+        text = build_openai_model_execution_guidance(set())
+        assert "web_search" not in text
+        assert "read_file" not in text
+        assert "search_files" not in text
+        assert "no permitted lookup tool" in text
+
+    def test_ambiguity_guidance_is_target_and_vantage_aware(self):
+        for text in (
+            OPENAI_MODEL_EXECUTION_GUIDANCE,
+            build_openai_model_execution_guidance({"terminal"}),
+        ):
+            assert "this machine" not in text.lower()
+            assert "named target" in text.lower()
+            assert "vantage point" in text.lower()
 
 
 class TestExecutionGuidanceModels:
