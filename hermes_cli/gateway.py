@@ -763,6 +763,14 @@ def find_gateway_pids(exclude_pids: set | None = None, all_profiles: bool = Fals
             _append_unique_pid(pids, get_running_pid(), _exclude)
         except Exception:
             pass
+        try:
+            from hermes_cli.gateway_process_discovery import control_socket_gateway_pid
+            from hermes_constants import get_hermes_home
+
+            socket_pid = control_socket_gateway_pid(get_hermes_home())
+            _append_unique_pid(pids, socket_pid, _exclude)
+        except Exception:
+            pass
     for pid in _get_service_pids(all_profiles=all_profiles):
         _append_unique_pid(pids, pid, _exclude)
     try:
