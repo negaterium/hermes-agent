@@ -120,3 +120,11 @@ def test_openai_codex_stale_floor_tiers():
 
     assert openai_codex_stale_timeout_floor(55_000) == 900.0
     assert openai_codex_stale_timeout_floor(120_000) == 1200.0
+
+
+def test_openai_codex_reasoning_models_have_admission_floor_below_context_tier():
+    from agent.chat_completion_helpers import openai_codex_stale_timeout_floor
+
+    assert openai_codex_stale_timeout_floor(9_991, "gpt-5.6-luna") == 180.0
+    assert openai_codex_stale_timeout_floor(9_991, "gpt-5.4-mini") == 180.0
+    assert openai_codex_stale_timeout_floor(9_991, "gpt-5.5") == 0.0

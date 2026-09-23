@@ -14,11 +14,13 @@ from agent.prompt_builder import (
     _scan_context_content,
     _truncate_content,
     _parse_skill_file,
+    _normalize_skill_query_terms,
     _skill_should_show,
     _find_hermes_md,
     _find_git_root,
     _cursorrules_candidates,
     _strip_yaml_frontmatter,
+    load_soul_md,
     build_skills_system_prompt,
     build_context_files_prompt,
     CONTEXT_FILE_MAX_CHARS,
@@ -27,6 +29,7 @@ from agent.prompt_builder import (
     _CONTEXT_FILE_DYNAMIC_CEILING,
     DEFAULT_AGENT_IDENTITY,
     drain_truncation_warnings,
+    build_openai_model_execution_guidance,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
     OPENAI_MODEL_EXECUTION_GUIDANCE,
@@ -84,6 +87,9 @@ class TestGuidanceConstants:
 
     def test_session_search_guidance_is_simple_cross_session_recall(self):
         assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
+        assert "session_list" in SESSION_SEARCH_GUIDANCE
+        assert "session_read" in SESSION_SEARCH_GUIDANCE
+        assert "knowledge_search" in SESSION_SEARCH_GUIDANCE
         assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
 
 
@@ -127,6 +133,13 @@ class TestScanContextContent:
         assert load_soul_md(home_override=tmp_path).startswith("# Persona")
         write_manifest(tmp_path, DistributionManifest(name="evil-dist"))  # legacy manifest owns the whole payload
         assert load_soul_md(home_override=tmp_path).startswith("[BLOCKED: SOUL.md")
+
+
+class TestSoulLoading:
+    def test_load_soul_md_accepts_profile_home_override(self, tmp_path):
+        (tmp_path / "SOUL.md").write_text("profile-specific identity", encoding="utf-8")
+
+        assert load_soul_md(home_override=tmp_path) == "profile-specific identity"
 
 
 
@@ -336,7 +349,12 @@ class TestBuildSkillsSystemPrompt:
         yield
         clear_skills_system_prompt_cache(clear_snapshot=True)
 
-
+    def test_skill_query_normalization_filters_stopwords(self):
+        assert _normalize_skill_query_terms("help me debug the Hermes gateway") == [
+            "debug",
+            "hermes",
+            "gateway",
+        ]
 
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -348,6 +366,20 @@ class TestBuildSkillsSystemPrompt:
         result = build_skills_system_prompt()
         # "search" should appear only once per category
         assert result.count("- search") == 1
+
+    def test_query_filter_uses_visible_skill_entries(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "debugging" / "systematic-debugging"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: systematic-debugging\n"
+            "description: Debug unexpected failures\n---\n"
+        )
+
+        result = build_skills_system_prompt(query="debug failures")
+
+        assert "systematic-debugging" in result
+        assert "candidate_skills" in result
 
 
     def test_compact_categories_demote_nested_and_miss_cache_separately(
@@ -1202,6 +1234,28 @@ class TestOpenAIModelExecutionGuidance:
     def test_guidance_gates_completion_on_verification(self):
         text = OPENAI_MODEL_EXECUTION_GUIDANCE.lower()
         assert "plausible subset" in text
+
+    def test_capability_aware_missing_context_does_not_name_unavailable_web_tool(self):
+        text = build_openai_model_execution_guidance({"read_file", "search_files"})
+        assert "web_search" not in text
+        assert "read_file" in text
+        assert "search_files" in text
+
+    def test_explicitly_empty_tool_surface_is_tool_neutral(self):
+        text = build_openai_model_execution_guidance(set())
+        assert "web_search" not in text
+        assert "read_file" not in text
+        assert "search_files" not in text
+        assert "no permitted lookup tool" in text
+
+    def test_ambiguity_guidance_is_target_and_vantage_aware(self):
+        for text in (
+            OPENAI_MODEL_EXECUTION_GUIDANCE,
+            build_openai_model_execution_guidance({"terminal"}),
+        ):
+            assert "this machine" not in text.lower()
+            assert "named target" in text.lower()
+            assert "vantage point" in text.lower()
 
 
 class TestExecutionGuidanceModels:

@@ -479,7 +479,10 @@ class TestDelegationCleanup:
         parent._active_children.append(child)
         relay_host = MagicMock()
         monkeypatch.setattr(relay_runtime, "get_runtime", lambda **_kwargs: relay_host)
-        monkeypatch.setattr("tools.delegate_tool._get_child_timeout", lambda: 0.1)
+        # The production helper clamps the timeout to its safety floor. A
+        # 0.1s mocked value can expire before the worker enters the mock under
+        # parallel load.
+        monkeypatch.setattr("tools.delegate_tool._get_child_timeout", lambda: 1.0)
 
         # The parent's cap must not elapse before the worker thread has opened the child's turn, or
         # the "late result" scenario degrades into "child never started" on a loaded runner. Gate the

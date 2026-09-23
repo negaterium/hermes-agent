@@ -1113,14 +1113,18 @@ class TestExecutionGuidanceConfig:
             return a
 
     def test_deepseek_gets_guidance_by_default(self):
-        from agent.prompt_builder import OPENAI_MODEL_EXECUTION_GUIDANCE
+        from agent.prompt_builder import build_openai_model_execution_guidance
         agent = self._make_agent(model="deepseek/deepseek-v4-pro")
-        assert OPENAI_MODEL_EXECUTION_GUIDANCE in agent._build_system_prompt()
+        available_tools = set(getattr(agent, "valid_tool_names", set()))
+        expected = build_openai_model_execution_guidance(available_tools)
+        assert expected in getattr(agent, "_build_system_prompt")()
 
     def test_gpt_still_gets_guidance(self):
-        from agent.prompt_builder import OPENAI_MODEL_EXECUTION_GUIDANCE
+        from agent.prompt_builder import build_openai_model_execution_guidance
         agent = self._make_agent(model="openai/gpt-4.1")
-        assert OPENAI_MODEL_EXECUTION_GUIDANCE in agent._build_system_prompt()
+        available_tools = set(getattr(agent, "valid_tool_names", set()))
+        expected = build_openai_model_execution_guidance(available_tools)
+        assert expected in getattr(agent, "_build_system_prompt")()
 
     def test_config_false_suppresses(self):
         from agent.prompt_builder import OPENAI_MODEL_EXECUTION_GUIDANCE
@@ -1130,11 +1134,13 @@ class TestExecutionGuidanceConfig:
         assert OPENAI_MODEL_EXECUTION_GUIDANCE not in agent._build_system_prompt()
 
     def test_config_list_matches(self):
-        from agent.prompt_builder import OPENAI_MODEL_EXECUTION_GUIDANCE
+        from agent.prompt_builder import build_openai_model_execution_guidance
         agent = self._make_agent(
             model="moonshotai/kimi-k3", execution_guidance=["kimi"]
         )
-        assert OPENAI_MODEL_EXECUTION_GUIDANCE in agent._build_system_prompt()
+        available_tools = set(getattr(agent, "valid_tool_names", set()))
+        expected = build_openai_model_execution_guidance(available_tools)
+        assert expected in getattr(agent, "_build_system_prompt")()
 
     def test_config_list_non_match_suppresses(self):
         from agent.prompt_builder import OPENAI_MODEL_EXECUTION_GUIDANCE
