@@ -200,7 +200,9 @@ class TestRunIdempotentProfileScope:
 
 
 class TestAdapterInit:
-    def test_default_config(self):
+    def test_default_config(self, monkeypatch):
+        for key in ("API_SERVER_HOST", "API_SERVER_PORT", "API_SERVER_KEY", "API_SERVER_CORS_ORIGINS"):
+            monkeypatch.delenv(key, raising=False)
         config = PlatformConfig(enabled=True)
         adapter = APIServerAdapter(config)
         assert adapter._host == "127.0.0.1"

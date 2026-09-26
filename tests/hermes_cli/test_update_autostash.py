@@ -31,6 +31,9 @@ def test_update_preserves_local_work_and_rescues_orphan_before_reset(
     before = git(t.clone, 'rev-parse', 'HEAD')
     (t.clone / 'untracked.txt').write_text('local edit\n', encoding='utf-8')
     t.args.channel, t.args.keep_stash = 'main', keep
+    # The command normally re-execs when this test interpreter belongs to a
+    # different checkout; keep the update pinned to this throwaway Git clone.
+    monkeypatch.setattr('hermes_cli.update_owning_install.retarget_to_owning_install', lambda _: None)
     monkeypatch.setattr(hermes_main, '_sync_with_upstream_if_needed', update_cmd._sync_with_upstream_if_needed)
     monkeypatch.setattr(update_cmd, '_UPDATE_CRITICAL_MODULES', ())
     original = subprocess.run

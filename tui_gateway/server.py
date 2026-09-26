@@ -1976,7 +1976,7 @@ def _load_enabled_toolsets(platform: str | None = None) -> list[str] | None:
         return None
 
 
-def _load_disabled_toolsets() -> list[str] | None:
+def _load_disabled_toolsets(cfg: dict | None = None) -> list[str] | None:
     """``agent.disabled_toolsets`` from config.yaml, or ``None``.
 
     The classic CLI (``cli_init_mixin``) and the messaging gateway both forward this list to
@@ -1989,9 +1989,11 @@ def _load_disabled_toolsets() -> list[str] | None:
     try:
         from agent.skill_utils import parse_config_string_list
 
-        from hermes_cli.config import load_config
+        if cfg is None:
+            from hermes_cli.config import load_config
+            cfg = load_config()
 
-        agent_cfg = load_config().get("agent") or {}
+        agent_cfg = (cfg or {}).get("agent") or {}
         disabled = parse_config_string_list(agent_cfg.get("disabled_toolsets"))
         return [str(ts) for ts in disabled] or None
     except Exception:
@@ -2535,7 +2537,7 @@ def _make_agent(
             reasoning_config_override if reasoning_config_override is not None else _load_reasoning_config(str(model or ""))),
         service_tier=service_tier_override if service_tier_override is not None else _load_service_tier(),
         enabled_toolsets=_load_enabled_toolsets(platform),
-        disabled_toolsets=_load_disabled_toolsets(),
+        disabled_toolsets=_load_disabled_toolsets(cfg),
         # OpenRouter provider_routing prefs (gateway + CLI parity).
         providers_allowed=_pr.get("only"), providers_ignored=_pr.get("ignore"), providers_order=_pr.get("order"),
         provider_sort=_pr.get("sort"), provider_require_parameters=_pr.get("require_parameters", False),

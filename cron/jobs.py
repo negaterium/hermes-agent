@@ -2276,6 +2276,11 @@ def clear_preflight_alerted(job_id: str) -> None:
     _set_alert_flag(job_id, "preflight_alerted", False)
 
 
+def mark_drift_alerted(job_id: str) -> bool:
+    """Mark the job as drift-alerted; return True if it already was."""
+    return _set_alert_flag(job_id, "drift_alerted", True)
+
+
 def note_fire_forward_failure(job_id: str, detail: str) -> bool:
     """Durably record (as ``last_fire_error``) that a scheduled fire could not be handed to the
     runner — written by the dashboard fire webhook when the loopback forward fails. Without it
@@ -2307,6 +2312,7 @@ def _record_run_outcome(
         # Healthy run: drop the alert-once dedup markers so a FUTURE break re-alerts, and clear
         # the forward-failure stamp so it only describes CURRENT auto-fire health.
         job.pop("preflight_alerted", None)
+        job.pop("drift_alerted", None)
         job.pop("last_fire_error", None)
         job["failure_streak"] = 0
     else:

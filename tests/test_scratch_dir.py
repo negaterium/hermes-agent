@@ -89,6 +89,9 @@ class TestScratchDirPermissionPolicy:
         for var in ("HERMES_HOME_MODE", "HERMES_MANAGED", "HERMES_CONTAINER",
                     "HERMES_SKIP_CHMOD", "HERMES_UID", "HERMES_GID"):
             monkeypatch.delenv(var, raising=False)
+        # The owner-only defaults below describe a standalone install. Explicit container
+        # cases override this probe or set HERMES_CONTAINER and still exercise sharing policy.
+        monkeypatch.setattr("hermes_constants._detect_container", lambda: False)
 
     def test_default_is_owner_only(self, tmp_path, monkeypatch):
         self._isolate_env(monkeypatch, tmp_path)

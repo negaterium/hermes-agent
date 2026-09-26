@@ -737,12 +737,42 @@ def find_gateway_pids(exclude_pids: set | None = None, all_profiles: bool = Fals
     """Find running gateway PIDs for the current profile, or every profile with ``all_profiles`` (``hermes update``)."""
     _exclude = set(exclude_pids or set())
     pids: list[int] = []
+    socket_pid_lookup = None
+    try:
+        from hermes_cli.gateway_process_discovery import control_socket_gateway_pid as socket_pid_lookup
+    except Exception:
+        pass
+    profile_homes = []
+    if socket_pid_lookup is not None:
+        try:
+            if all_profiles:
+                from hermes_cli.profiles import get_profile_dir, list_profile_names
+
+                for name in list_profile_names():
+                    try:
+                        profile_homes.append(get_profile_dir(name))
+                    except Exception:
+                        continue
+            else:
+                from hermes_constants import get_hermes_home
+
+                profile_homes = [get_hermes_home()]
+        except Exception:
+            pass
+
     if not all_profiles:
         try:
             from gateway.status import get_running_pid
             _append_unique_pid(pids, get_running_pid(), _exclude)
         except Exception:
             pass
+    if socket_pid_lookup is not None:
+        for profile_home in profile_homes:
+            try:
+                socket_pid = socket_pid_lookup(profile_home)
+                _append_unique_pid(pids, socket_pid, _exclude)
+            except Exception:
+                pass
     for pid in _get_service_pids(all_profiles=all_profiles):
         _append_unique_pid(pids, pid, _exclude)
     try:

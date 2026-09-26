@@ -439,6 +439,91 @@ def test_runner_selection_records_actual_test_identity(tmp_path, form, expected)
 
 
 
+def test_multiple_absolute_paths_split_on_pathsep(tmp_path: Path) -> None:
+    """``--paths`` accepts ``os.pathsep``-joined absolute paths.
+
+    On Windows the absolute paths contain drive-letter colons, so a naive
+    ``split(":")`` shreds them into phantom roots and only one (or neither)
+    of the two probe dirs would be discovered.
+    """
+    dir_a = _make_probe_dir(tmp_path)
+    dir_b = tmp_path / "probe_b"
+    dir_b.mkdir()
+    (dir_b / "test_flagprobe_b.py").write_text(
+        "def test_gamma():\n    assert True\n"
+    )
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [sys.executable, str(runner),
+         "--paths", os.pathsep.join([str(dir_a), str(dir_b)]),
+         "-j", "1", "--file-timeout", "30", "-q"],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout
+    assert "Discovered 2 test files" in proc.stdout, proc.stdout
+
+
+def test_exclude_removes_named_file_from_discovery(tmp_path: Path) -> None:
+    """``--exclude`` omits a file without hiding failures in the rest of the run."""
+    probe_dir = _make_probe_dir(tmp_path)
+    excluded = probe_dir / "test_excluded_probe.py"
+    excluded.write_text(
+        "def test_must_not_run():\n"
+        "    raise AssertionError('excluded probe executed')\n",
+        encoding="utf-8",
+    )
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--paths",
+            str(probe_dir),
+            "--exclude",
+            str(excluded),
+            "-j",
+            "1",
+            "--file-timeout",
+            "30",
+            "-q",
+        ],
+        cwd=repo_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    assert "Excluded 1 test file" in proc.stdout, proc.stdout
+    assert "Discovered 1 test files" in proc.stdout, proc.stdout
+    assert "excluded probe executed" not in proc.stdout, proc.stdout
+    assert "2 tests passed" in proc.stdout, proc.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="drive-letter paths")
+def test_drive_letter_colon_is_not_a_path_separator(tmp_path: Path) -> None:
+    """An absolute ``--paths`` value stays one root on Windows.
+
+    The naive split used to produce a phantom relative root ``'C'`` (the
+    drive letter) alongside the real path; discovery only worked by the
+    accident of ``repo_root / '\\rooted\\rest'`` re-anchoring onto the
+    repo's drive.
+    """
+    probe_dir = _make_probe_dir(tmp_path)
+    proc = _run_runner(probe_dir, "-q")
+    assert proc.returncode == 0, proc.stdout
+    drive = str(probe_dir)[0]
+    assert f"['{drive}', " not in proc.stdout, (
+        f"drive letter split off as a phantom root:\n{proc.stdout}"
+    )
+    assert "Discovered 1 test files" in proc.stdout, proc.stdout
+
+
 @pytest.mark.platforms("posix")  # POSIX signal death; Windows has no SIGSEGV exit
 def test_interpreter_crash_is_reported_as_a_crash_not_as_no_tests_ran(tmp_path: Path) -> None:
     """A file whose interpreter dies by signal is classified as CRASHED (#113186).

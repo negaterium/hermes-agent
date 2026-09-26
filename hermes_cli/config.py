@@ -3102,6 +3102,191 @@ def edit_config():
     subprocess.run([editor, str(config_path)])
 
 
+# ---- Cron model-drift helpers: which unpinned jobs stay on their creation snapshot ----
+
+_CRON_DRIFT_AXIS_BY_KEY = {
+    "model": "model", "model.default": "model", "model.model": "model", "model.name": "model",
+    "model.provider": "provider", "provider": "provider"}
+
+
+def _cron_model_drift_axis_for_config_key(key: str) -> Optional[str]:
+    """Return the cron inference axis affected by a config key, if any."""
+    return _CRON_DRIFT_AXIS_BY_KEY.get(str(key or "").strip().lower())
+
+
+def _cron_section(config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return the ``cron`` mapping of *config* (loading the merged config when None), else None."""
+    if config is None:
+        try:
+            config = load_config()
+        except Exception:
+            return None
+    cron_config = config.get("cron") if isinstance(config, dict) else None
+    return cron_config if isinstance(cron_config, dict) else None
+
+
+def cron_model_drift_guard_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether cron must fail closed on unpinned inference drift.
+    Only the literal YAML boolean ``false`` disables this spend-safety guard; missing, malformed,
+    or non-boolean values stay fail-closed. With *config* omitted the merged config is loaded so
+    CLI warnings honor the same user/managed setting as the scheduler.
+    """
+    cron_config = _cron_section(config)
+    return cron_config is None or cron_config.get("model_drift_guard", True) is not False
+
+
+_CRON_MODEL_IMPACT_JOB_LIMIT = 50
+_CRON_MODEL_IMPACT_ID_LIMIT = 256
+_CRON_MODEL_IMPACT_NAME_LIMIT = 120
+
+
+def _model_assignment_text(value: Any) -> str:
+    """Return a trimmed scalar model/provider value, or empty for malformed data."""
+    return value.strip() if isinstance(value, str) else ""
+
+
+def resolve_cron_model_drift_defaults(
+    config: Any, *, environ: Optional[Dict[str, str]] = None) -> Tuple[str, str]:
+    """Resolve the global ``(provider, model)`` cron compares against snapshots.
+    Mirrors the scheduler's precedence: a truthy configured model wins over ``HERMES_MODEL``; the
+    environment is only a fallback. Per-job and cron fleet defaults are handled by the caller
+    because they cover an axis rather than changing the global assignment."""
+    env = os.environ if environ is None else environ
+    provider = ""
+    model_config = config.get("model") if isinstance(config, dict) else None
+    if isinstance(model_config, dict):
+        provider = _model_assignment_text(model_config.get("provider"))
+        model_config = model_config.get("default") or model_config.get("model") or model_config.get("name")
+    configured_model = _model_assignment_text(model_config)
+    return provider, configured_model or _model_assignment_text(env.get("HERMES_MODEL", ""))
+
+
+def cron_model_drift_axes(
+    job: Any, *, current_provider: Any = "", current_model: Any = "", config: Any = None
+) -> List[str]:
+    """Return the unpinned axes that the fail-closed cron guard would block."""
+    if not isinstance(job, dict) or not cron_model_drift_guard_enabled(config):
+        return []
+
+    current = {
+        "provider": _model_assignment_text(current_provider).lower(),
+        "model": _model_assignment_text(current_model).lower()}
+    # A cron.model / cron.model_provider fleet default covers its axis: that axis never reads the
+    # snapshot at fire time, so reporting it would be false.
+    fleet = _cron_section(config) or {}
+    drifted: List[str] = []
+    for axis, fleet_key in (("provider", "model_provider"), ("model", "model")):
+        if _model_assignment_text(fleet.get(fleet_key)) or _model_assignment_text(job.get(axis)):
+            continue
+        snapshot = _model_assignment_text(job.get(f"{axis}_snapshot")).lower()
+        if snapshot and current[axis] and snapshot != current[axis]:
+            drifted.append(axis)
+    return drifted
+
+
+def _is_control_char(char: str) -> bool:
+    return unicodedata.category(char).startswith("C")
+
+
+def _valid_cron_impact_job_id(value: Any) -> str:
+    job_id = value.strip() if isinstance(value, str) else ""
+    if len(job_id) > _CRON_MODEL_IMPACT_ID_LIMIT or any(map(_is_control_char, job_id)):
+        return ""
+    return job_id
+
+
+def _cron_impact_job_name(value: Any, job_id: str) -> str:
+    if isinstance(value, str):
+        printable = "".join(char for char in value if not _is_control_char(char))
+        name = " ".join(printable.split())[:_CRON_MODEL_IMPACT_NAME_LIMIT].rstrip()
+        if name:
+            return name
+    return f"Job {job_id}"[:_CRON_MODEL_IMPACT_NAME_LIMIT].rstrip()
+
+
+def _cron_model_impact_result(available: bool, guard_enabled: bool) -> Dict[str, Any]:
+    return {
+        "available": available,
+        "guard_enabled": guard_enabled,
+        "affected_count": 0,
+        "truncated": False,
+        "jobs": []}
+
+
+def build_cron_model_impact(
+    *, current_provider: Any = "", current_model: Any = "", config: Any = None, jobs: Any = None
+) -> Dict[str, Any]:
+    """Build a bounded, profile-local summary of jobs blocked by model drift.
+    Job-store inspection is best effort: the model assignment has already succeeded when Desktop
+    requests this, so an unreadable store is reported as unavailable rather than failing.
+    """
+    guard_enabled = cron_model_drift_guard_enabled(config)
+    if jobs is None:
+        try:
+            from cron.jobs import load_jobs
+
+            jobs = load_jobs()
+        except Exception:
+            return _cron_model_impact_result(False, guard_enabled)
+    if not isinstance(jobs, list):
+        return _cron_model_impact_result(False, guard_enabled)
+
+    result = _cron_model_impact_result(True, guard_enabled)
+    if not guard_enabled:
+        return result
+
+    from cron.jobs import is_job_runnable
+
+    seen_ids: Set[str] = set()
+    for job in jobs:
+        if not isinstance(job, dict) or not is_job_runnable(job) or job.get("no_agent"):
+            continue
+        job_id = _valid_cron_impact_job_id(job.get("id"))
+        if not job_id or job_id in seen_ids:
+            continue
+        seen_ids.add(job_id)
+        axes = cron_model_drift_axes(
+            job, current_provider=current_provider, current_model=current_model, config=config)
+        if not axes:
+            continue
+        result["affected_count"] += 1
+        if len(result["jobs"]) < _CRON_MODEL_IMPACT_JOB_LIMIT:
+            result["jobs"].append({
+                "id": job_id,
+                "name": _cron_impact_job_name(job.get("name"), job_id),
+                "drifted_axes": axes})
+
+    result["truncated"] = result["affected_count"] > len(result["jobs"])
+    return result
+
+
+def warn_unpinned_cron_jobs_after_model_config_change(
+    key: str, value: Any, config: Optional[Dict[str, Any]] = None) -> None:
+    """Warn when a global model/provider change will trip cron's drift guard."""
+    axis = _cron_model_drift_axis_for_config_key(key)
+    if axis is None:
+        return
+
+    new_value = _model_assignment_text(value)
+    if not new_value:
+        return
+    impact = build_cron_model_impact(
+        current_provider=new_value if axis == "provider" else "",
+        current_model=new_value if axis == "model" else "", config=config, jobs=None)
+    affected = impact["affected_count"]
+    if affected <= 0:
+        return
+
+    noun, verb = ("job", "has") if affected == 1 else ("jobs", "have")
+    print(
+        f"⚠️  {affected} enabled unpinned cron {noun} {verb} stored "
+        f"{axis}_snapshot values that differ from the new global {axis}. "
+        "They will fail closed on their next run instead of silently using the changed "
+        "model/provider. Inspect with `hermes cron list`, then pin the intended values with "
+        "`hermes cron edit <job_id> --provider <provider> --model <model>`." )
+
+
+
 def _default_value_for_key(dotted_key: str):
     """Return the leaf value declared for *dotted_key* in ``DEFAULT_CONFIG`` (None for dicts/misses)."""
     node = cfg_get(DEFAULT_CONFIG, *_split_key_path(dotted_key))
@@ -3638,6 +3823,7 @@ def set_config_value(key: str, value: str, force: bool = False):
     print(f"✓ Set {key} = {_display_value} in {config_path}")
     if _route_notice:
         print(_route_notice)
+    warn_unpinned_cron_jobs_after_model_config_change(key, value, user_config)
 
     # Post-write unknown-key notice (#34067): value IS saved, but tell the user the runtime may never read
     # it and suggest the likely-intended path.

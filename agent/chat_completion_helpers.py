@@ -425,24 +425,34 @@ def _is_openai_codex_backend(agent) -> bool:
     return classify_responses_route(agent).is_codex_backend
 
 
-def openai_codex_stale_timeout_floor(est_tokens: int) -> float:
-    """Minimum wall-clock stale timeout for openai-codex by estimated context:
-    subscription-backed Codex can spend minutes in admission/prefill on
+def openai_codex_stale_timeout_floor(est_tokens: int, model: Optional[str] = None) -> float:
+    """Minimum wall-clock stale timeout for openai-codex.
+
+    Subscription-backed Codex can spend minutes in admission/prefill on
     gateway-scale payloads, so the generic default would abort healthy calls.
-    The floor engages above 10k estimated tokens."""
+    The two reasoning models used by the DarkServer Codex route also need a
+    modest admission floor for ordinary-sized requests: a recent prompt grew
+    to just under the context tier (9,991 estimated tokens) and was killed by
+    the generic 90-second detector before Codex could answer.
+    """
     for threshold, floor in ((100_000, 1200.0), (50_000, 900.0), (10_000, 600.0)):
         if est_tokens > threshold:
             return floor
+    model_slug = (model or "").strip().lower().rsplit("/", 1)[-1]
+    if model_slug in {"gpt-5.6-luna", "gpt-5.4-mini"}:
+        return 180.0
     return 0.0
 
 
-def _bound_openai_codex_stale_timeout(stale_timeout: float, est_tokens: int) -> float:
+def _bound_openai_codex_stale_timeout(
+    stale_timeout: float, est_tokens: int, model: Optional[str] = None,
+) -> float:
     """Apply the openai-codex stale bounds: raise to ``openai_codex_stale_timeout_floor``
     so healthy gateway-scale requests aren't aborted mid-prefill, then clamp to the flat
     HERMES_CODEX_HARD_TIMEOUT_SECONDS ceiling (#64507, default 1500s — above the max
     floor, a backstop for a request that emits SOME events then wedges; 0 disables).
     Shared by the worker watchdogs and the inline cron path (#69734)."""
-    floor = openai_codex_stale_timeout_floor(est_tokens)
+    floor = openai_codex_stale_timeout_floor(est_tokens, model)
     if floor:
         stale_timeout = max(stale_timeout, floor)
     hard_timeout = env_float("HERMES_CODEX_HARD_TIMEOUT_SECONDS", 1500.0)
@@ -873,7 +883,11 @@ def _resolve_direct_stale_timeout(agent, api_kwargs: dict) -> float:
         return float("inf")
     base_url = getattr(agent, "base_url", None)
     if getattr(agent, "api_mode", None) == "codex_responses" and not (base_url and is_local_endpoint(base_url)):
-        return _bound_openai_codex_stale_timeout(float(value), estimate_request_context_tokens(api_kwargs))
+        return _bound_openai_codex_stale_timeout(
+            float(value),
+            estimate_request_context_tokens(api_kwargs),
+            api_kwargs.get("model") or getattr(agent, "model", None),
+        )
     return float(value)
 
 
@@ -1217,9 +1231,16 @@ def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs
     # large-context floor, hard ceiling and TTFB scale-up/cap below must not tighten it.
     base_url = getattr(agent, "base_url", None)
     local = bool(base_url) and is_local_endpoint(base_url)
-    if codex and not local:
-        codex_floor = openai_codex_stale_timeout_floor(est_tokens)
-        stale_timeout = _bound_openai_codex_stale_timeout(stale_timeout, est_tokens)
+    if codex and openai_codex_backend and not local:
+        # Raise the stale floor for large payloads so healthy gateway-scale
+        # requests aren't aborted mid-prefill.
+        codex_floor = openai_codex_stale_timeout_floor(
+            est_tokens, api_kwargs.get("model") or getattr(agent, "model", None))
+        stale_timeout = _bound_openai_codex_stale_timeout(
+            stale_timeout,
+            est_tokens,
+            api_kwargs.get("model") or getattr(agent, "model", None),
+        )
 
     idle_default = max(effort_floor, next(
         (default for threshold, default in ((100_000, 180.0), (50_000, 120.0), (10_000, 60.0)) if est_tokens > threshold),
@@ -1263,6 +1284,16 @@ def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs
     if ttfb_enabled and not ttfb_explicit:
         # High-effort thinking precedes the first event; the floor outranks the cap.
         ttfb_timeout = max(ttfb_timeout, effort_floor)
+
+    # Keep the no-byte watchdog from firing before the model-specific admission
+    # floor. Explicit operator configuration still wins.
+    if (openai_codex_backend and not local and ttfb_enabled
+            and os.getenv("HERMES_CODEX_TTFB_TIMEOUT_SECONDS") is None
+            and os.getenv("HERMES_CODEX_TTFB_MAX_SECONDS") is None):
+        model_floor = openai_codex_stale_timeout_floor(
+            0, api_kwargs.get("model") or getattr(agent, "model", None))
+        if model_floor:
+            ttfb_timeout = max(ttfb_timeout, min(model_floor, 300.0))
 
     # An operator-set idle timeout keeps first-event semantics; only the implicit
     # default defers arming until model progress. Sentinel: env_float returns the

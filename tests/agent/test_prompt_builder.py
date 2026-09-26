@@ -12,16 +12,28 @@ from agent.prompt_builder import (
     _scan_context_content,
     _truncate_content,
     _parse_skill_file,
+    _normalize_skill_query_terms,
     _skill_should_show,
     _find_hermes_md,
     _find_git_root,
     _cursorrules_candidates,
     _strip_yaml_frontmatter,
+    load_soul_md,
     build_skills_system_prompt,
     build_context_files_prompt,
     CONTEXT_FILE_MAX_CHARS,
     _get_context_file_max_chars,
     drain_truncation_warnings,
+    build_openai_model_execution_guidance,
+    TOOL_USE_ENFORCEMENT_GUIDANCE,
+    TOOL_USE_ENFORCEMENT_MODELS,
+    OPENAI_MODEL_EXECUTION_GUIDANCE,
+    PARALLEL_TOOL_CALL_GUIDANCE,
+    GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
+    MEMORY_GUIDANCE,
+    SESSION_SEARCH_GUIDANCE,
+    PLATFORM_HINTS,
+    WSL_ENVIRONMENT_HINT,
 )
 
 
@@ -47,6 +59,33 @@ def _drain_truncation_warnings():
 # =========================================================================
 
 
+class TestGuidanceConstants:
+    def test_memory_guidance_keeps_form_rule_and_routing(self):
+        """Dieted (#95681): WHAT belongs in memory is the memory tool
+        schema's job (taught on every call). This block keeps only the
+        declarative-form rule and the staleness/skills routing."""
+        from agent.prompt_builder import MEMORY_GUIDANCE
+
+        assert "declarative facts" in MEMORY_GUIDANCE
+        assert "imperative phrasing" in MEMORY_GUIDANCE
+        assert "stale within a week" in MEMORY_GUIDANCE
+        # Skills are the default home for task-learned knowledge (incl. the
+        # user's preferences/corrections for that work); memory is the narrow
+        # every-session exception. The routing rule must LEAD, not trail.
+        assert MEMORY_GUIDANCE.index("Skills come first") < MEMORY_GUIDANCE.index("Memory is the narrow exception")
+        assert "preferences and corrections" in MEMORY_GUIDANCE
+        assert "Save proactively" not in MEMORY_GUIDANCE
+        assert "workflows belong" in MEMORY_GUIDANCE
+        # The category/SKIP curricula must NOT be re-taught here.
+        assert "PR numbers" not in MEMORY_GUIDANCE
+        assert "tool quirks" not in MEMORY_GUIDANCE
+
+    def test_session_search_guidance_is_simple_cross_session_recall(self):
+        assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
+        assert "session_list" in SESSION_SEARCH_GUIDANCE
+        assert "session_read" in SESSION_SEARCH_GUIDANCE
+        assert "knowledge_search" in SESSION_SEARCH_GUIDANCE
+        assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
 
 
 # =========================================================================
@@ -89,6 +128,13 @@ class TestScanContextContent:
         assert load_soul_md(home_override=tmp_path).startswith("# Persona")
         write_manifest(tmp_path, DistributionManifest(name="evil-dist"))  # legacy manifest owns the whole payload
         assert load_soul_md(home_override=tmp_path).startswith("[BLOCKED: SOUL.md")
+
+
+class TestSoulLoading:
+    def test_load_soul_md_accepts_profile_home_override(self, tmp_path):
+        (tmp_path / "SOUL.md").write_text("profile-specific identity", encoding="utf-8")
+
+        assert load_soul_md(home_override=tmp_path) == "profile-specific identity"
 
 
 
@@ -262,7 +308,12 @@ class TestBuildSkillsSystemPrompt:
         yield
         clear_skills_system_prompt_cache(clear_snapshot=True)
 
-
+    def test_skill_query_normalization_filters_stopwords(self):
+        assert _normalize_skill_query_terms("help me debug the Hermes gateway") == [
+            "debug",
+            "hermes",
+            "gateway",
+        ]
 
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -274,6 +325,20 @@ class TestBuildSkillsSystemPrompt:
         result = build_skills_system_prompt()
         # "search" should appear only once per category
         assert result.count("- search") == 1
+
+    def test_query_filter_uses_visible_skill_entries(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "debugging" / "systematic-debugging"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: systematic-debugging\n"
+            "description: Debug unexpected failures\n---\n"
+        )
+
+        result = build_skills_system_prompt(query="debug failures")
+
+        assert "systematic-debugging" in result
+        assert "candidate_skills" in result
 
 
     def test_compact_categories_demote_nested_and_miss_cache_separately(
@@ -953,6 +1018,108 @@ class TestBuildSkillsSystemPromptConditional:
 
 
 
+class TestOpenAIModelExecutionGuidance:
+    """Tests for GPT/Codex-specific execution discipline guidance."""
+
+
+
+    def test_guidance_covers_verification(self):
+        text = OPENAI_MODEL_EXECUTION_GUIDANCE.lower()
+        assert "verification" in text or "verify" in text
+        assert "correctness" in text
+
+
+
+    def test_guidance_is_string(self):
+        assert isinstance(OPENAI_MODEL_EXECUTION_GUIDANCE, str)
+        assert len(OPENAI_MODEL_EXECUTION_GUIDANCE) > 100
+
+    def test_guidance_covers_external_write_readback(self):
+        text = OPENAI_MODEL_EXECUTION_GUIDANCE.lower()
+        assert "read" in text and "back" in text
+        assert "successful tool call is not a successful task" in text
+
+    def test_guidance_covers_count_reconciliation(self):
+        text = OPENAI_MODEL_EXECUTION_GUIDANCE.lower()
+        assert "has_more" in text
+        assert "hard assertions" in text
+
+    def test_guidance_covers_literal_preservation(self):
+        text = OPENAI_MODEL_EXECUTION_GUIDANCE.lower()
+        assert "normalize" in text
+        assert "malformed" in text
+
+    def test_guidance_covers_retry_differently(self):
+        text = OPENAI_MODEL_EXECUTION_GUIDANCE.lower()
+        assert "suspiciously narrow" in text
+        assert "retry" in text
+
+    def test_guidance_gates_completion_on_verification(self):
+        text = OPENAI_MODEL_EXECUTION_GUIDANCE.lower()
+        assert "plausible subset" in text
+
+    def test_capability_aware_missing_context_does_not_name_unavailable_web_tool(self):
+        text = build_openai_model_execution_guidance({"read_file", "search_files"})
+        assert "web_search" not in text
+        assert "read_file" in text
+        assert "search_files" in text
+
+    def test_explicitly_empty_tool_surface_is_tool_neutral(self):
+        text = build_openai_model_execution_guidance(set())
+        assert "web_search" not in text
+        assert "read_file" not in text
+        assert "search_files" not in text
+        assert "no permitted lookup tool" in text
+
+    def test_ambiguity_guidance_is_target_and_vantage_aware(self):
+        for text in (
+            OPENAI_MODEL_EXECUTION_GUIDANCE,
+            build_openai_model_execution_guidance({"terminal"}),
+        ):
+            assert "this machine" not in text.lower()
+            assert "named target" in text.lower()
+            assert "vantage point" in text.lower()
+
+
+class TestExecutionGuidanceModels:
+    """Behavior contracts for the default auto-match model list."""
+
+    def test_includes_historical_families(self):
+        from agent.prompt_builder import EXECUTION_GUIDANCE_MODELS
+        for fam in ("gpt", "codex", "grok"):
+            assert fam in EXECUTION_GUIDANCE_MODELS
+
+    def test_includes_composio_eval_families(self):
+        from agent.prompt_builder import EXECUTION_GUIDANCE_MODELS
+        for fam in ("deepseek", "kimi", "qwen", "glm", "minimax", "mimo", "mistral"):
+            assert fam in EXECUTION_GUIDANCE_MODELS
+
+    def test_muse_spark_gets_both_guidance_blocks(self):
+        # Muse Spark closes the turn after a chat-only response on defaults
+        # (#96550) — it needs tool-use enforcement AND execution guidance.
+        from agent.prompt_builder import EXECUTION_GUIDANCE_MODELS
+        assert any(p in "meta/muse-spark-1.3-contributor" for p in TOOL_USE_ENFORCEMENT_MODELS)
+        assert any(p in "meta/muse-spark-1.3-contributor" for p in EXECUTION_GUIDANCE_MODELS)
+
+    def test_excludes_google_and_claude(self):
+        # Gemini/Gemma get GOOGLE_MODEL_OPERATIONAL_GUIDANCE instead;
+        # Claude doesn't exhibit the targeted failure modes.
+        from agent.prompt_builder import EXECUTION_GUIDANCE_MODELS
+        for fam in ("gemini", "gemma", "claude"):
+            assert fam not in EXECUTION_GUIDANCE_MODELS
+
+
+class TestParallelToolCallGuidance:
+    """Behavior contracts for the universal parallel-tool-call guidance block.
+
+    Asserts the invariants the block must satisfy (steer batching, scope to
+    independent calls, stay short for the cached prompt) rather than freezing
+    its exact wording.
+    """
+
+    def test_is_nonempty_string(self):
+        assert isinstance(PARALLEL_TOOL_CALL_GUIDANCE, str)
+        assert PARALLEL_TOOL_CALL_GUIDANCE.strip()
 
 
 

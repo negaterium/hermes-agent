@@ -1,9 +1,9 @@
-"""Unpinned cron jobs run on the main agent model at fire time; ``pinned`` locks it.
+"""Cron jobs use creation snapshots or current defaults; ``pinned`` locks explicitly.
 
 Contract:
-  - run_job() resolves per-job pin > cron.model / cron.model_provider > the main agent model
-    (config ``model:``). There is no creation-time snapshot axis any more: a record that still
-    carries legacy ``provider_snapshot`` / ``model_snapshot`` keys follows the main model.
+  - run_job() resolves per-job pin > cron.model / cron.model_provider > creation snapshot >
+    main agent model (config ``model:``). A snapshot preserves the job's original route when
+    global defaults move; records without snapshots follow the current defaults.
   - create_job(pinned=True) / update_job({"pinned": True}) lock the CURRENT main provider+model
     onto the job as an ordinary per-job pin; ``pinned=False`` releases both.
 
@@ -85,14 +85,23 @@ def _run(job, tmp_path, *, current_provider="openrouter", current_model=None, cr
 
 
 class TestUnpinnedJobsFollowTheMainModel:
-    def test_legacy_snapshot_record_follows_the_main_model(self, tmp_path):
-        """A record created under the old snapshot design keeps running, on the CURRENT main
-        provider/model, never on what it was created under."""
+    def test_creation_snapshot_preserves_the_original_route(self, tmp_path):
+        """An existing job does not silently switch provider/model after global config changes."""
         job = _base_job(provider_snapshot="old-provider", model_snapshot="old-model")
         success, error, agent_kwargs, resolve_kwargs = _run(
             job, tmp_path, current_provider="new-provider", current_model="new-model")
 
         assert success is True, error
+        assert agent_kwargs is not None and resolve_kwargs is not None
+        assert agent_kwargs["model"] == "old-model"
+        assert resolve_kwargs["requested"] == "old-provider"
+        assert resolve_kwargs["target_model"] == "old-model"
+
+    def test_unsnapshotted_job_follows_current_main_model(self, tmp_path):
+        success, error, agent_kwargs, resolve_kwargs = _run(
+            _base_job(), tmp_path, current_provider="new-provider", current_model="new-model")
+        assert success is True, error
+        assert agent_kwargs is not None and resolve_kwargs is not None
         assert agent_kwargs["model"] == "new-model"
         assert resolve_kwargs["requested"] is None
         assert resolve_kwargs["target_model"] == "new-model"

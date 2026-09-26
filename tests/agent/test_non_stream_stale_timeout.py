@@ -110,3 +110,12 @@ def test_openai_codex_stale_floor_tiers():
     # Contract, not literals: a bigger request never gets a shorter floor.
     small, large = openai_codex_stale_timeout_floor(55_000), openai_codex_stale_timeout_floor(120_000)
     assert 0 < small <= large
+
+
+def test_openai_codex_reasoning_models_have_admission_floor_below_context_tier():
+    from agent.chat_completion_helpers import openai_codex_stale_timeout_floor
+
+    context_floor = openai_codex_stale_timeout_floor(55_000)
+    for model in ("gpt-5.6-luna", "gpt-5.4-mini"):
+        assert 0 < openai_codex_stale_timeout_floor(9_991, model) < context_floor
+    assert openai_codex_stale_timeout_floor(9_991, "gpt-5.5") == 0.0

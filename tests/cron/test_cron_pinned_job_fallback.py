@@ -123,8 +123,9 @@ def test_resolve_job_runtime_walks_the_chain_for_an_unpinned_job():
         raise AuthError("No credentials stored")
 
     with patch("hermes_cli.runtime_provider.resolve_runtime_provider", side_effect=resolve):
-        runtime, model = _resolve_job_runtime(_job(), "free-job", jc)
+        runtime, model, primary_provider = _resolve_job_runtime(_job(), "free-job", jc)
     assert (runtime["provider"], model) == ("openrouter", "z-ai/glm-5.2")
+    assert primary_provider is None  # the fallback is not mistaken for the primary
 
 
 @pytest.mark.parametrize("pin", PINS)

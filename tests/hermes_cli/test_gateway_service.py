@@ -874,6 +874,7 @@ class TestGatewayServiceDetection:
     def test_supports_systemd_services_returns_true_when_systemctl_present(self, monkeypatch):
         monkeypatch.setattr(gateway_cli, "is_linux", lambda: True)
         monkeypatch.setattr(gateway_cli, "is_wsl", lambda: False)
+        monkeypatch.setattr(gateway_cli, "is_container", lambda: False)
         monkeypatch.setattr(gateway_cli.shutil, "which", lambda name: "/usr/bin/systemctl")
 
         assert gateway_cli.supports_systemd_services() is True
@@ -1566,6 +1567,7 @@ class TestHermesHomeForTargetUser:
     def test_remaps_default_home(self, monkeypatch):
         monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/root")))
         monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: Path("/root/.hermes"))
 
         result = gateway_cli._hermes_home_for_target_user("/home/alice")
         assert result == "/home/alice/.hermes"
@@ -1582,8 +1584,10 @@ class TestGeneratedUnitIncludesLocalBin:
             "_build_user_local_paths",
             lambda home_path, existing: [str(home_path / ".local" / "bin")],
         )
-        unit = gateway_cli.generate_systemd_unit(system=True)
-        # System unit uses the resolved home dir from _system_service_identity
+        # The suite runs as root in a container; explicitly selecting root
+        # exercises PATH generation without violating the production safety
+        # default that rejects implicit root service installation.
+        unit = gateway_cli.generate_systemd_unit(system=True, run_as_user="root")
         assert "/.local/bin" in unit
 
 
