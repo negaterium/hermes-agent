@@ -426,6 +426,32 @@ class TestDisabledToolsetsPlatformBundle:
         assert bundle_non_core_tools("hermes-does-not-exist") == set()
 
 
+class TestProjectToolsetBoundary:
+    """The GUI surface may enable project, but profile suppression wins at schema resolution."""
+
+    def test_disabled_project_is_absent_from_final_schema(self):
+        from model_tools import get_tool_definitions
+
+        tools = get_tool_definitions(
+            enabled_toolsets=["project"],
+            disabled_toolsets=["project"],
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        )
+
+        assert "desktop_project" not in {tool["function"]["name"] for tool in tools}
+
+    def test_allowed_project_remains_available(self):
+        from model_tools import get_tool_definitions
+        import tools.project_tools  # noqa: F401 — register the GUI-only tool for this positive case
+
+        tools = get_tool_definitions(
+            enabled_toolsets=["project"], quiet_mode=True, skip_tool_search_assembly=True,
+        )
+
+        assert "desktop_project" in {tool["function"]["name"] for tool in tools}
+
+
 class TestDisabledToolsetsPostureToolset:
     """Regression test for #57315: disabling a posture toolset (`coding`,
     posture: True) must preserve the shared core tools it re-lists but does

@@ -26,6 +26,7 @@ import pytest
 
 import hermes_cli.gateway as gateway_cli
 import hermes_cli.update_cmd as update_cmd
+from hermes_cli.update_cmd import _warn_incomplete_gateway_fleet_restart
 
 LABEL = "ai.hermes.gateway"
 
@@ -323,16 +324,29 @@ class TestInvokingProfileIsVerifiedLikeItsSiblings:
         assert calls["verify"] == 0
 
     def test_unregistered_label_is_restarted_not_skipped(self, monkeypatch):
-        """A booted-out job (plist present, deregistered) must be RESTARTED.
-
-        FLIPPED by the #74973 fix (salvage #75021): this test used to pin
-        'registered=False → nothing to restart', which was precisely the
-        silent-skip bug — launchctl list is session-scoped and non-zero
-        for booted-out jobs whose plist very much still wants a gateway;
-        launchd_restart() owns the bootout/bootstrap ladder for that state.
-        """
+        """A booted-out job with a plist needs bootstrap even when list fails."""
         calls = _patch_launchd_env(monkeypatch, registered=False)
 
         assert _run_fleet_restart() == ([LABEL], [])
         assert calls["restart"] == 1
         assert calls["verify"] == 1
+
+class TestIncompleteFleetWarningIsPlatformCorrect:
+    def test_macos_recovery_instructions_are_launchctl(self, monkeypatch, capsys):
+        """A launchd label must not be handed systemctl commands."""
+        monkeypatch.setattr(gateway_cli, "is_macos", lambda: True)
+
+        _warn_incomplete_gateway_fleet_restart([LABEL])
+
+        out = capsys.readouterr().out
+        assert "launchctl bootstrap" in out
+        assert "systemctl" not in out
+
+    def test_linux_recovery_instructions_are_unchanged(self, monkeypatch, capsys):
+        monkeypatch.setattr(gateway_cli, "is_macos", lambda: False)
+
+        _warn_incomplete_gateway_fleet_restart(["hermes-gateway.service"])
+
+        out = capsys.readouterr().out
+        assert "systemctl --user restart <unit>" in out
+        assert "launchctl" not in out

@@ -38,6 +38,8 @@ Environment:
     HERMES_TEST_PATHS    Override discovery roots (colon-sep; on Windows
                          ';' also works and drive letters are handled;
                          default: 'tests')
+    HERMES_TEST_EXCLUDE  Colon-separated file names or path/glob patterns to
+                         exclude after discovery
 
 Exit code: 0 if every file's pytest exited 0; 1 otherwise.
 """
@@ -45,6 +47,7 @@ Exit code: 0 if every file's pytest exited 0; 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -133,7 +136,7 @@ _SKIP_PARTS = {"integration", "e2e", "docker"}
 # Per-file wall-clock cap. Override
 # via --file-timeout or HERMES_TEST_FILE_TIMEOUT.
 #
-# Set to 300s (5 min) deliberately generous: the per-test subprocess
+# Set to 420s (7 min) deliberately generous: the per-test subprocess
 # isolation plugin spawns a fresh Python process per test, so a
 # large-collection file pays N × (interpreter startup + import) of
 # overhead before any test logic runs — and that overhead dilates under
@@ -141,7 +144,7 @@ _SKIP_PARTS = {"integration", "e2e", "docker"}
 # files that finish in ~100s on a quiet box. The Docker build matrix jobs
 # take 7-10 min anyway, so this headroom costs nothing on total CI wall
 # time while keeping a genuinely hung file bounded.
-_DEFAULT_FILE_TIMEOUT_SECONDS = 300.0
+_DEFAULT_FILE_TIMEOUT_SECONDS = 420.0
 
 # One-shot retry of failing test FILES. A file that exits non-zero is re-run
 # once in a fresh subprocess; if the re-run passes, the file counts as passed
@@ -191,6 +194,27 @@ def _split_pathspec(value: str) -> List[str]:
             parts.append(part)
             i += 1
     return [p for p in parts if p.strip()]
+
+
+def _matches_exclude(path: Path, repo_root: Path, patterns: List[str]) -> bool:
+    """Return whether *path* matches an exclusion path or glob pattern.
+
+    Patterns may be absolute, repository-relative (for example
+    ``tests/hermes_cli/test_whatsapp_onboarding.py``), or a basename/glob for
+    temporary probe files. All comparisons use POSIX separators so the same
+    command works on Windows and POSIX hosts.
+    """
+    relative = _format_file(path, repo_root).replace("\\", "/")
+    absolute = path.resolve().as_posix()
+    basename = path.name
+    candidates = (relative, absolute, basename)
+    for raw_pattern in patterns:
+        pattern = raw_pattern.strip().replace("\\", "/")
+        if not pattern:
+            continue
+        if any(fnmatch.fnmatchcase(candidate, pattern) for candidate in candidates):
+            return True
+    return False
 
 # Host-OS gating (see the ``_OS_MARKS`` block in tests/conftest.py): tests
 # marked for another host are collected and SKIPPED by the conftest hook —
@@ -1076,6 +1100,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--exclude",
+        default=os.environ.get("HERMES_TEST_EXCLUDE", ""),
+        metavar="LIST",
+        help=(
+            "Colon-separated file names or path/glob patterns to exclude "
+            "after discovery (on Windows, ';' also separates). "
+            "Env: HERMES_TEST_EXCLUDE."
+        ),
+    )
+    parser.add_argument(
         "paths_positional",
         nargs="*",
         metavar="PATH",
@@ -1105,6 +1139,7 @@ def main() -> int:
         "-h", "--help", "-j", "--jobs", "--paths", "--include-integration",
         "--file-timeout", "--file-retries", "--slice", "--generate-slices", "--files",
         "--files-from",
+        "--exclude",
     }
     # pytest short flags that consume the NEXT token as their value.
     PYTEST_VALUE_FLAGS = {"-k", "-m", "-p", "-o", "-c", "-r", "-W"}
@@ -1248,6 +1283,22 @@ def main() -> int:
             _SKIP_PARTS = set()
 
         files = _discover_files(roots)
+
+    exclude_patterns = _split_pathspec(args.exclude)
+    if exclude_patterns:
+        excluded_files = [
+            file for file in files if _matches_exclude(file, repo_root, exclude_patterns)
+        ]
+        files = [
+            file for file in files if not _matches_exclude(file, repo_root, exclude_patterns)
+        ]
+        if excluded_files:
+            label = "file" if len(excluded_files) == 1 else "files"
+            print(
+                f"Excluded {len(excluded_files)} test {label} via --exclude: "
+                + ", ".join(_format_file(file, repo_root) for file in excluded_files),
+                flush=True,
+            )
 
     if not files:
         print("No test files to run", file=sys.stderr)

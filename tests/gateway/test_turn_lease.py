@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from gateway.turn_lease import (
+    DEFAULT_LEASE_WAIT,
     SessionTurnLeaseRegistry,
     TurnLeaseTimeoutError,
 )
@@ -193,7 +194,7 @@ async def test_full_dispatch_rejects_lease_timeout_without_running_goal_hook(
     )
     assert holder is not None
     monkeypatch.setenv("HERMES_AGENT_TIMEOUT", "120")
-    monkeypatch.setenv("HERMES_TURN_LEASE_TIMEOUT", "0.02")
+    monkeypatch.setenv("HERMES_TURN_LEASE_TIMEOUT", "0.05")
 
     runner.session_store.load_transcript.side_effect = AssertionError(
         "transcript must not load after a turn-lease timeout"
@@ -205,6 +206,8 @@ async def test_full_dispatch_rejects_lease_timeout_without_running_goal_hook(
     runner._post_turn_goal_continuation = AsyncMock()
 
     try:
+        # Keep the lease rejection short, but leave enough wall time for the
+        # isolated runner/bootstrap work before the handler reaches it.
         response = await asyncio.wait_for(runner._handle_message(_event()), timeout=30)
     finally:
         assert runner._turn_leases.release(holder) is True
@@ -484,4 +487,17 @@ def test_runner_release_turn_lease_is_token_scoped_and_bare_safe():
 
     _run(scenario())
 
+
+
+
+# Additional fork regression coverage retained across the upstream merge.
+
+def test_default_wait_cannot_head_of_line_block_platform_updates_for_minutes():
+    """A contended topic must fail/queue promptly, not pin Telegram's updater.
+
+    Telegram dispatches updates sequentially. Awaiting a held session lease for
+    1,800 seconds blocks unrelated topics behind the waiter even though their
+    sessions do not share a transcript.
+    """
+    assert DEFAULT_LEASE_WAIT == 5.0
 

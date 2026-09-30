@@ -1028,6 +1028,10 @@ def _cleanup_invalid_pid_path(
     for path in (pid_path, _get_gateway_lock_path(pid_path)) if unlink_lock else (pid_path,):
         with contextlib.suppress(Exception):
             path.unlink(missing_ok=True)
+    # The primary gateway's status record is stale with its PID. A profile- or
+    # alternate-path cleanup must not erase another process's status record.
+    if pid_path == _get_pid_path():
+        _unlink_quietly(_get_runtime_status_path())
 
 
 def _try_acquire_file_lock(handle) -> bool:
