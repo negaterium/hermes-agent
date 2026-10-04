@@ -107,7 +107,7 @@ def _validate_editorial(brief: dict) -> None:
 
 
 def _read_draft(path: Path) -> tuple[str, str, dict]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(payload, dict):
         raise ValueError("draft must be a JSON object")
     if not isinstance(payload.get("editorial"), dict):
@@ -150,7 +150,7 @@ def _atomic_json(path: Path, payload: dict) -> None:
 def _new_state(path: Path, **updates) -> dict:
     current = {}
     if path.exists():
-        current = json.loads(path.read_text(encoding="utf-8"))
+        current = json.loads(path.read_text(encoding="utf-8-sig"))
     current.update(updates)
     _atomic_json(path, current)
     return current
@@ -189,7 +189,7 @@ def _prior_ambiguous_run(publish_date: str) -> dict | None:
         return None
     for path in sorted(state_dir.glob(f"{publish_date}-*.json")):
         try:
-            record = json.loads(path.read_text(encoding="utf-8"))
+            record = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
         if record.get("state") in AMBIGUOUS_STATES:
@@ -390,7 +390,7 @@ def main() -> int:
             body=returned_body,
             draft=draft,
         )
-        archived = archive_path.read_text(encoding="utf-8")
+        archived = archive_path.read_text(encoding="utf-8-sig")
         archive_verified = (
             returned_title in archived
             and returned_url in archived

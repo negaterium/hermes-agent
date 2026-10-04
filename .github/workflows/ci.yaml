@@ -216,6 +216,8 @@ jobs:
     needs: detect
     if: needs.detect.outputs.python == 'true'
     uses: ./.github/workflows/contributor-check.yml
+    with:
+      base_ref: ${{ github.base_ref }}
 
   uv-lockfile:
     name: Check uv.lock

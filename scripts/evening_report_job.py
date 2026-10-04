@@ -52,7 +52,7 @@ def run(
 
 def load_state() -> str | None:
     try:
-        data = json.loads(STATE.read_text(encoding="utf-8"))
+        data = json.loads(STATE.read_text(encoding="utf-8-sig"))
     except Exception:
         return None
     value = data.get("last_sent_date") if isinstance(data, dict) else None
@@ -211,7 +211,7 @@ def main() -> int:
         garmin_file = garmin_dir / f"{month_num} - {month_name}.md"
         garmin_dir.mkdir(parents=True, exist_ok=True)
         garmin_content = (
-            garmin_file.read_text(encoding="utf-8")
+            garmin_file.read_text(encoding="utf-8-sig")
             if garmin_file.exists()
             else f"# Garmin — {month_name} {year}\n"
         )
@@ -233,7 +233,7 @@ def main() -> int:
         session_file = session_dir / f"{local_date}.md"
         session_dir.mkdir(parents=True, exist_ok=True)
         session_content = (
-            session_file.read_text(encoding="utf-8")
+            session_file.read_text(encoding="utf-8-sig")
             if session_file.exists()
             else f"# Session — {local_date} ({now.strftime('%A')})\n"
         )

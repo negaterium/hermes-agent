@@ -332,6 +332,7 @@ class TestInvokingProfileIsVerifiedLikeItsSiblings:
         assert calls["verify"] == 1
 
 class TestIncompleteFleetWarningIsPlatformCorrect:
+    @pytest.mark.platforms("macos")
     def test_macos_recovery_instructions_are_launchctl(self, monkeypatch, capsys):
         """A launchd label must not be handed systemctl commands."""
         monkeypatch.setattr(gateway_cli, "is_macos", lambda: True)
