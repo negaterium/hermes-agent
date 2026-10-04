@@ -1112,8 +1112,10 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
     # A multiplexed gateway may have switched HERMES_HOME since model_tools was imported;
     # make sure this profile's plugins are discovered before the tool snapshot.
     try:
-        from hermes_cli.plugins import discover_plugins
-        discover_plugins()
+        from hermes_cli.kanban_packet_startup import packet_worker_enabled
+        if not packet_worker_enabled():
+            from hermes_cli.plugins import discover_plugins
+            discover_plugins()
     except Exception:
         logger.warning("Plugin discovery failed during agent setup", exc_info=True)
 
@@ -1136,14 +1138,24 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
     if drops:
         agent.tools = [t for t in agent.tools if t["function"]["name"] not in drops]
 
+    from hermes_cli.kanban_packet_startup import (
+        PACKET_KANBAN_GUIDANCE,
+        packet_worker_enabled,
+        restrict_packet_tool_definitions,
+    )
+    packet = packet_worker_enabled()
+    if packet:
+        agent.tools = restrict_packet_tool_definitions(agent.tools or [])
+
     agent.valid_tool_names = {tool["function"]["name"] for tool in agent.tools} if agent.tools else set()
     # Kanban guidance is session-static for the dispatcher-owned worker only. Profiles may
     # expose kanban_show interactively, and children/cron runs inherit the env var, without
     # owning a task.
     from agent.delegation_context import owned_kanban_task
     from agent.prompt_builder import KANBAN_GUIDANCE
+    guidance = PACKET_KANBAN_GUIDANCE if packet else KANBAN_GUIDANCE
     agent._kanban_worker_guidance = (
-        KANBAN_GUIDANCE if owned_kanban_task() and "kanban_show" in agent.valid_tool_names else ""
+        guidance if owned_kanban_task() and "kanban_show" in agent.valid_tool_names else ""
     )
     if agent.quiet_mode:
         return

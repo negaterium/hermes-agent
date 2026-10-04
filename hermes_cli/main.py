@@ -661,6 +661,14 @@ def _apply_profile_override() -> None:
 
 
 _apply_profile_override()
+from hermes_cli.kanban_packet_startup import PacketStartupError, require_packet_startup
+
+try:
+    require_packet_startup()
+except PacketStartupError as exc:
+    print(f"Packet worker startup refused: {exc}", file=sys.stderr)
+    raise SystemExit(78) from None
+
 # ``-p``/active_profile re-homed the process after hermes_bootstrap ran: re-point the temp vars
 # at THIS home's scratch dir (a user-set TMPDIR is still left alone).
 try:

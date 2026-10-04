@@ -158,8 +158,10 @@ try:  # plugin tool discovery (user/project/pip plugins)
     # message — freezing Discord/Telegram heartbeats for up to 120s whenever any configured MCP server was
     # slow or unreachable (#16856). - gateway/run.py            -> start_gateway() uses run_in_executor -
     # acp_adapter/server.py     -> asyncio.to_thread on session init
-    from hermes_cli.plugins import discover_plugins
-    discover_plugins()
+    from hermes_cli.kanban_packet_startup import packet_worker_enabled
+    if not packet_worker_enabled():
+        from hermes_cli.plugins import discover_plugins
+        discover_plugins()
 except Exception as e:
     logger.debug("Plugin discovery failed: %s", e)
 
@@ -271,11 +273,13 @@ def _tool_defs_cache_key(
         cfg_fp = file_signature(cfg_stat)
     except (FileNotFoundError, OSError, ImportError):
         cfg_fp = None
+    from hermes_cli.kanban_packet_startup import packet_worker_enabled
     return (
         registry.current_scope_key(), frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
         frozenset(disabled_toolsets) if disabled_toolsets else None, registry._generation, cfg_fp,
         bool(os.environ.get("HERMES_KANBAN_TASK")), bool(skip_tool_search_assembly),
         _is_delegated_child_context(), _is_dispatcher_owned_worker(), profile_scope,
+        packet_worker_enabled(),
     )
 
 
@@ -525,6 +529,10 @@ def _compute_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disa
         filtered_tools = sanitize_tool_schemas(filtered_tools)
     except Exception as e:  # pragma: no cover — defensive
         logger.warning("Schema sanitization skipped: %s", e)
+
+    from hermes_cli.kanban_packet_startup import packet_worker_enabled, restrict_packet_tool_definitions
+    if packet_worker_enabled():
+        return restrict_packet_tool_definitions(filtered_tools)
 
     # Tool Search (progressive disclosure): replace MCP/plugin tools with the
     # tool_search/describe/call bridge when the deferrable surface exceeds the
@@ -899,6 +907,15 @@ def handle_function_call(
         _emit_post_tool_call_hook(function_name=function_name, function_args=function_args, result=result,
                                   **asdict(ids), middleware_trace=list(trace), **extra)
         return result
+
+    from hermes_cli.kanban_packet_startup import packet_worker_enabled
+    if packet_worker_enabled():
+        try:
+            from hermes_cli.kanban_packet_startup import assert_packet_tool_allowed
+            assert_packet_tool_allowed(function_name)
+        except Exception as exc:
+            return _emit(tool_error(f"Packet worker call refused: {exc}"),
+                         status="blocked", error_type="packet_worker_policy", error_message=str(exc))
 
     # Tool Search bridge: tool_search / tool_describe are catalog reads handled
     # inline; tool_call is unwrapped so every downstream hook (pre/post, edit

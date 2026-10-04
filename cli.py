@@ -442,6 +442,10 @@ def _prepare_deferred_agent_startup() -> None:
     global _deferred_agent_startup_done
     if _deferred_agent_startup_done:
         return
+    from hermes_cli.kanban_packet_startup import packet_worker_enabled
+    if packet_worker_enabled():
+        _deferred_agent_startup_done = True
+        return
     if os.environ.get("HERMES_DEFER_AGENT_STARTUP") != "1":
         return
     _deferred_agent_startup_done = True
@@ -1525,6 +1529,13 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
 
 def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills):
     """Resolve the toolset list (explicit / coding posture / platform default), construct HermesCLI, and start the background skills preload."""
+    from hermes_cli.kanban_packet_startup import packet_worker_enabled, require_packet_startup
+    if packet_worker_enabled():
+        require_packet_startup()
+        # Packet workers have one pinned toolset and no profile/task prompt inputs.
+        toolsets = "kanban"
+        ignore_rules = True
+        skills = None
     toolsets_list = None
     if isinstance(toolsets, str) and toolsets:
         toolsets_list = [t.strip() for t in toolsets.split(",")]

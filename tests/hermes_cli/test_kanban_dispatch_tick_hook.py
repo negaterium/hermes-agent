@@ -25,6 +25,10 @@ from hermes_cli.plugins import get_plugin_manager
 def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
+    (home / "config.yaml").write_text("{}\n", encoding="utf-8")
+    profile = home / "profiles" / "alice"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("{}\n", encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()

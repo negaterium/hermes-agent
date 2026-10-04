@@ -99,6 +99,10 @@ def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
     Desktop backend) is connected by the next call, which every agent build makes, so a new session
     gets its tools without a reload (#76954). Discovery is additive: live servers are untouched.
     """
+    from hermes_cli.kanban_packet_startup import packet_worker_enabled
+    if packet_worker_enabled():
+        logger.info("Packet worker: MCP discovery disabled")
+        return
     home_key = hermes_home_key()
     with _mcp_discovery_lock:
         if home_key in _mcp_discovery_started:

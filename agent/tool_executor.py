@@ -762,6 +762,24 @@ def _run_agent_tool_execution_middleware(
     authorization_gate: _ConcurrentToolAuthorizationGate | None = None,
 ) -> _ManagedToolResult:
     """Run Relay rewrites before Hermes policy and dispatch exactly once."""
+    from hermes_cli.kanban_packet_startup import PacketStartupError, packet_worker_enabled
+    if packet_worker_enabled():
+        trace = middleware_trace if middleware_trace is not None else []
+        ref = _ToolCallRef(function_name, function_args, effective_task_id, tool_call_id, trace)
+        try:
+            from hermes_cli.kanban_packet_startup import assert_packet_tool_allowed
+            assert_packet_tool_allowed(function_name)
+        except PacketStartupError as exc:
+            result = json.dumps(
+                {"error": "packet_worker_call_refused", "message": str(exc)},
+                ensure_ascii=False,
+            )
+            ref.emit_post(agent, result, status="blocked", error_type="packet_worker_policy",
+                          error_message=str(exc))
+            return _ManagedToolResult(
+                result=result, args=function_args, middleware_trace=trace,
+                blocked=True, dispatched=False,
+            )
     from agent import relay_tools
     from hermes_cli.middleware import (
         apply_tool_request_middleware,

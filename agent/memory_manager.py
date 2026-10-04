@@ -106,6 +106,9 @@ def memory_provider_tools_exposed(agent: Any) -> bool:
     Same gate as ``inject_memory_provider_tools`` so a provider's ``system_prompt_block()``
     never advertises tools absent from the tool surface.
     """
+    from hermes_cli.kanban_packet_startup import packet_worker_enabled
+    if packet_worker_enabled():
+        return False
     tools = getattr(agent, "tools", None)
     present = isinstance(tools, (list, tuple)) and any(_tool_name(t) == "memory" for t in tools)
     enabled, disabled = getattr(agent, "enabled_toolsets", None), getattr(agent, "disabled_toolsets", None)
@@ -114,6 +117,9 @@ def memory_provider_tools_exposed(agent: Any) -> bool:
 
 def inject_memory_provider_tools(agent: Any) -> int:
     """Append external memory-provider tool schemas to an agent tool surface; return count added."""
+    from hermes_cli.kanban_packet_startup import packet_worker_enabled
+    if packet_worker_enabled():
+        return 0
     memory_manager = getattr(agent, "_memory_manager", None)
     tools = getattr(agent, "tools", None)
     if not memory_manager or tools is None:

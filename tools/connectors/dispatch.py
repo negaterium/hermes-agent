@@ -8,7 +8,19 @@ from tools.connectors.gateway.config import MAX_CALLS_PER_DISPATCH
 from tools.connectors.gateway.merge import assemble_results, fill_remote_failure, partition_calls
 
 
+def _packet_dispatch_guard(name):
+    try:
+        from hermes_cli.kanban_packet_startup import assert_packet_tool_allowed
+        assert_packet_tool_allowed(name)
+    except Exception as exc:
+        return tool_error(f"Packet worker connector dispatch refused: {exc}")
+    return None
+
+
 def dispatch_connector_call(name, arguments, tool_call_id):
+    refused = _packet_dispatch_guard(name)
+    if refused is not None:
+        return refused
     from tools.connectors.gateway.bridge import run_remote
 
     partition = partition_calls([{"name": name, "arguments": arguments}])
@@ -26,6 +38,10 @@ def dispatch_connector_batch(calls, ids, *, user_task, enabled_tools,
     if len(calls) > MAX_CALLS_PER_DISPATCH:
         return tool_error(f"too many calls: {len(calls)} > max {MAX_CALLS_PER_DISPATCH}. "
                           "Retry with fewer calls per batch.")
+    for call in calls:
+        refused = _packet_dispatch_guard(call.get("name"))
+        if refused is not None:
+            return refused
     partition = partition_calls(calls)
     if partition.local:
         from tools.tool_search_validation import local_batch_error

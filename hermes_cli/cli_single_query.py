@@ -298,6 +298,11 @@ def _run_quiet_single_query(cli, effective_query, emitter=None):
 
 def _route_single_query_images(cli, query, effective_query, single_query_images, single_query_image_urls):
     """Attach one-shot images natively when the model supports vision, else pre-describe them as text."""
+    from hermes_cli.kanban_packet_startup import PacketStartupError, packet_worker_enabled
+    if packet_worker_enabled():
+        if single_query_images or single_query_image_urls:
+            raise PacketStartupError("packet worker attachments are not permitted")
+        return effective_query
     if not (single_query_images or single_query_image_urls):
         return effective_query
     # Same image-routing decision as the interactive path: a vision-capable model
@@ -342,6 +347,9 @@ def _route_single_query_images(cli, query, effective_query, single_query_images,
 
 def _collect_kanban_task_images(single_query_images):
     """Kanban workers: image paths/URLs in the task body join the first turn's attachments."""
+    from hermes_cli.kanban_packet_startup import packet_worker_enabled
+    if packet_worker_enabled():
+        return []
     single_query_image_urls: list[str] = []
     _kanban_task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
     if not _kanban_task_id:

@@ -2091,14 +2091,33 @@ def _dispatch_lane_task(
         if per_profile_cap is not None and name:
             per_profile_running[name] = per_profile_running.get(name, 0) + 1
 
+    from hermes_cli.kanban_db_worker_preflight import claim_preflight, preflight_task, refuse
+    from hermes_cli.kanban_worker_policy import PolicyError
+    live_task = _kb.get_task(conn, task_id)
+    if live_task is None:
+        return False
+    try:
+        selected = preflight_task(live_task, lane=lane, board=board)
+    except PolicyError as exc:
+        refuse(conn, task_id, result, exc, dry_run=dry_run)
+        return False
+
     if dry_run:
         result.spawned.append((task_id, assignee, ""))
         _count_spawn(assignee)
         return True
     claim = _kb.claim_review_task if lane == "review" else _kb.claim_task
-    claimed = claim(conn, task_id, ttl_seconds=ttl_seconds)
+    try:
+        claimed = claim(conn, task_id, ttl_seconds=ttl_seconds,
+                        worker_profile=assignee, worker_config=selected.config,
+                        worker_preflight=claim_preflight(live_task, selected, board=board))
+    except PolicyError as exc:
+        refuse(conn, task_id, result, exc)
+        return False
     if claimed is None:
         return False
+    # Dispatcher-local config provenance, NOT a worker startup context (Task 3b).
+    claimed._worker_preflight = selected
     try:
         resolved_branch_name = None
         if claimed.workspace_kind == "worktree":
@@ -2699,21 +2718,13 @@ def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[st
     """
     if not hermes_home:
         return None
-    try:
-        from hermes_cli.config import load_config
-        from hermes_cli.tools_config import _get_platform_tools
+    from hermes_cli.tools_config import _get_platform_tools
+    from hermes_cli.kanban_db_worker_config import effective_configuration
 
-        with _worker_profile_scope(hermes_home):
-            cfg = load_config()
-            toolsets = sorted(_get_platform_tools(cfg, "cli"))
-        return toolsets or None
-    except Exception as exc:
-        _kb._log.debug(
-            "kanban worker: could not resolve CLI toolsets for HERMES_HOME=%r (%s)",
-            hermes_home,
-            exc,
-        )
-        return None
+    with _worker_profile_scope(hermes_home):
+        cfg = effective_configuration(hermes_home)
+        toolsets = sorted(_get_platform_tools(cfg, "cli"))
+    return toolsets or None
 
 
 _retagged_workspace_roots: set[str] = set()
@@ -2755,13 +2766,23 @@ def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> li
         # Workers run under a profile-scoped HERMES_HOME and so see that
         # profile's shell-hook allowlist; pass --accept-hooks explicitly so
         # configured hooks still register.
-        "--accept-hooks",
     ]
+    from hermes_cli.kanban_db_worker_preflight import preflight_task
+    from hermes_cli.kanban_worker_policy import PacketPolicy
+    selected = getattr(task, "_worker_preflight", None) or preflight_task(task)
+    packet = isinstance(selected.policy, PacketPolicy)
+    if not packet:
+        cmd.append("--accept-hooks")
+    else:
+        # Packet workers never load profile context/rules or task-supplied skills.
+        cmd.append("--ignore-rules")
     # One `--skills X` pair per name: easier to read in `ps` and avoids quoting
-    # ambiguity if a skill name contains unusual chars.
-    for sk in task.skills or ():
-        if sk:
-            cmd.extend(["--skills", sk])
+    # ambiguity if a skill name contains unusual chars. Packet preflight rejects
+    # skills, and the startup boundary omits them defensively as well.
+    if not packet:
+        for sk in task.skills or ():
+            if sk:
+                cmd.extend(["--skills", sk])
     if task.model_override:
         cmd.extend(["-m", task.model_override])
         # Pin the provider too so the worker resolves the model against the
@@ -2772,7 +2793,7 @@ def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> li
     # model at a different depth.
     if task.reasoning_effort:
         cmd.extend(["--reasoning", task.reasoning_effort])
-    worker_toolsets = _resolve_worker_cli_toolsets(hermes_home)
+    worker_toolsets = ["kanban"] if packet else _resolve_worker_cli_toolsets(hermes_home)
     if worker_toolsets:
         cmd.extend(["--toolsets", ",".join(worker_toolsets)])
     cmd.extend(["chat", "-q", f"work kanban task {task.id}"])
@@ -2844,19 +2865,20 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     if not task.assignee:
         raise ValueError(f"task {task.id} has no assignee")
 
-    from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
-
-    profile_arg = normalize_profile_name(task.assignee)
+    from hermes_cli.kanban_db_worker_preflight import preflight_task
+    from hermes_cli.kanban_packet_startup import PACKET_WORKER_ENV
+    from hermes_cli.kanban_worker_policy import PacketPolicy, PolicyError, policy_json
+    selected = preflight_task(task, board=board)
+    previous = getattr(task, "_worker_preflight", None)
+    if previous is not None and previous != selected:
+        raise PolicyError("assigned configuration changed before worker creation")
+    task._worker_preflight = selected
+    profile_arg = selected.profile
 
     from agent.secret_scope import is_multiplex_active
     from tools.environments.local import _is_routed_home, build_subprocess_env, strip_launch_profile_env
 
-    try:
-        profile_home = resolve_profile_env(profile_arg)
-    except FileNotFoundError:
-        # No profile dir (isolated test fixtures) — the CLI resolves it from
-        # HERMES_PROFILE (set below) instead.
-        profile_home = None
+    profile_home = selected.home
 
     # Scrub for a ROUTED home, not only under multiplex: the authority test is "does this worker act
     # for another profile", exactly as served_profile_child_env decides it (tools/environments/local.py).
@@ -2926,6 +2948,10 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # Pin the board DB + workspaces root so the worker's kanban paths still
     # match after `hermes -p` rewrites HERMES_HOME (symlink / Docker layouts).
     env["HERMES_KANBAN_DB"] = str(_kb.kanban_db_path(board=board))
+    # Packet startup independently cross-checks the DB against this dispatcher
+    # selected board root; without the root, a foreign DB containing matching
+    # task/run/claim rows could impersonate the assigned board.
+    env["HERMES_KANBAN_HOME"] = str(_kb.kanban_home().resolve())
     env["HERMES_KANBAN_WORKSPACES_ROOT"] = str(_kb.workspaces_root(board=board))
     _retag_legacy_worker_sessions(env["HERMES_KANBAN_WORKSPACES_ROOT"])
     # Board slug — defense-in-depth pin if a path is resolved without the
@@ -2934,6 +2960,21 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # kanban_comment reads HERMES_PROFILE for its default author; `-p` alone
     # doesn't set the env var.
     env["HERMES_PROFILE"] = profile_arg
+    if isinstance(selected.policy, PacketPolicy):
+        env[PACKET_WORKER_ENV] = "1"
+        env["HERMES_KANBAN_BOUND_DB"] = env["HERMES_KANBAN_DB"]
+        env["HERMES_KANBAN_WORKER_PROFILE"] = selected.profile
+        env["HERMES_KANBAN_WORKER_HOME"] = selected.home
+        env["HERMES_KANBAN_WORKER_POLICY"] = policy_json(selected.policy)
+    else:
+        for _packet_key in (
+            PACKET_WORKER_ENV,
+            "HERMES_KANBAN_BOUND_DB",
+            "HERMES_KANBAN_WORKER_PROFILE",
+            "HERMES_KANBAN_WORKER_HOME",
+            "HERMES_KANBAN_WORKER_POLICY",
+        ):
+            env.pop(_packet_key, None)
     # This is the grant boundary: the dispatcher assigned this new worker's task.
     from agent.delegation_context import DELEGATED_CHILD_ENV_MARKER
     env.pop(DELEGATED_CHILD_ENV_MARKER, None)

@@ -141,6 +141,10 @@ class ShellHookSpec(_ToolMatcherMixin):
 def register_from_config(cfg: Optional[Dict[str, Any]], *, accept_hooks: bool = False) -> List[ShellHookSpec]:
     """Register every configured shell hook (idempotent); returns the newly wired specs. Skipped
     entries (unknown, malformed, not allowlisted, already registered) are logged only."""
+    from hermes_cli.kanban_packet_startup import packet_worker_enabled
+    if packet_worker_enabled():
+        logger.info("Packet worker: shell-hook registration disabled")
+        return []
     if not isinstance(cfg, dict):
         return []
     from utils import env_var_enabled
