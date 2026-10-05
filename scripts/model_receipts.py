@@ -63,7 +63,7 @@ def window_for(args: argparse.Namespace) -> tuple[float, float, str]:
 def load_cron_names(home: Path) -> dict[str, str]:
     path = home / "cron" / "jobs.json"
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError):
         return {}
     jobs = raw.get("jobs", raw) if isinstance(raw, dict) else raw
