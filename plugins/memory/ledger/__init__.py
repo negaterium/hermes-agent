@@ -346,18 +346,14 @@ class LedgerMemoryProvider(MemoryProvider):
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
         try:
-            import yaml
-            from hermes_cli.config import read_user_config_raw
+            from hermes_cli.config import atomic_config_write, read_user_config_raw
 
             config_path = Path(hermes_home) / "config.yaml"
             existing = read_user_config_raw(config_path)
             existing.setdefault("memory", {})
             existing["memory"]["ledger"] = dict(values)
             config_path.parent.mkdir(parents=True, exist_ok=True)
-            config_path.write_text(
-                yaml.safe_dump(existing, sort_keys=False, default_flow_style=False),
-                encoding="utf-8",
-            )
+            atomic_config_write(config_path, existing)
         except Exception:
             logger.exception("Could not save exact memory ledger configuration")
 

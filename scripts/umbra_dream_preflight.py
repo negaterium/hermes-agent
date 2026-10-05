@@ -29,7 +29,7 @@ def _load_state(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     if not path.exists():
         return {}, None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None, "checkpoint is unreadable"
     if not isinstance(value, dict):

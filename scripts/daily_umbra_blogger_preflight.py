@@ -28,7 +28,7 @@ def _policy_path() -> Path:
 
 
 def _publication_mode() -> str:
-    policy = json.loads(_policy_path().read_text(encoding="utf-8"))
+    policy = json.loads(_policy_path().read_text(encoding="utf-8-sig"))
     mode = policy.get("publication_mode")
     if mode not in {"review_only", "live"}:
         raise ValueError("editorial publication mode must be review_only or live")

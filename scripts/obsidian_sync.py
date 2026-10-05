@@ -152,7 +152,7 @@ def latest_log_tail(lines: int = 80) -> str:
     path = Path(LOG)
     if not path.exists():
         return ""
-    content = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    content = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
     return "\n".join(content[-lines:])
 
 
