@@ -99,6 +99,7 @@ def test_default_spawn_model_override_survives_real_cli_parse(monkeypatch, tmp_p
     """
     root = tmp_path / ".hermes"
     (root / "profiles" / "elias").mkdir(parents=True)
+    (root / "profiles" / "elias" / "config.yaml").write_text("{}\n", encoding="utf-8")
     root.joinpath("config.yaml").write_text("{}\n", encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(root))
 

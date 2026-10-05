@@ -150,11 +150,31 @@ def _persisted_identity() -> str:
     return current_profile_name("worker") or "worker"
 
 
+def _authorize_packet_handler(tool_name: str, args: dict) -> None:
+    """Keep packet authorization on the handler body as well as its wrapper.
+
+    Normal registry dispatch enters through ``_kanban_handler``.  Keeping this
+    check in the body closes direct handler references (including a re-bound
+    ``__wrapped__`` function) without changing generic-worker behavior.
+    """
+    from hermes_cli.kanban_packet_startup import authorize_packet_operation, packet_worker_enabled
+
+    if packet_worker_enabled():
+        authorize_packet_operation(tool_name, args)
+
+
 def _kanban_handler(tool_name: str) -> Callable:
     """Wrap a handler so every failure is a structured tool error. ``ValueError``
     (invalid board slug, DB validation such as cycle/self-link, ``AttachmentTooLarge``)
     is reported without a traceback; anything else is logged with ``logger.exception``."""
     def deco(fn):
+        def guarded_body(args: dict, **kw) -> str:
+            # Keep the exposed ``__wrapped__`` reference behind the same packet
+            # gate as registry dispatch.  This matters to rebinding/test/plugin
+            # paths that retain a direct handler reference.
+            _authorize_packet_handler(tool_name, args)
+            return fn(args, **kw)
+
         @functools.wraps(fn)
         def wrapper(args: dict, **kw) -> str:
             try:
@@ -165,13 +185,14 @@ def _kanban_handler(tool_name: str) -> Callable:
                 _check(not unknown,
                        f"{tool_name}: unknown parameter(s): {', '.join(unknown)}. "
                        f"Valid parameters: {', '.join(sorted(properties))}. Nothing changed.")
-                return fn(args, **kw)
+                return guarded_body(args, **kw)
             except _Reject as e:
                 return e.args[0]
             except Exception as e:
                 if not isinstance(e, ValueError):
                     logger.exception(f"{tool_name} failed")
                 return tool_error(f"{tool_name}: {e}")
+        wrapper.__wrapped__ = guarded_body
         return wrapper
     return deco
 
@@ -637,6 +658,7 @@ def inject_new_comments_from_env(agent: Any) -> bool:
 @_kanban_handler("kanban_show")
 def _handle_show(args: dict, **kw) -> str:
     """Full task state: row, parents, children, comments, runs, last 50 events."""
+    _authorize_packet_handler("kanban_show", args)
     tid = _require_task_id(args)
     with _board(args.get("board")) as (kb, conn):
         task = _existing_task(kb, conn, tid)
@@ -775,6 +797,7 @@ def _handle_complete(args: dict, **kw) -> str:
 @_kanban_handler("kanban_block")
 def _handle_block(args: dict, **kw) -> str:
     """Transition the task to blocked with a reason a human will read."""
+    _authorize_packet_handler("kanban_block", args)
     tid = _worker_guard("kanban_block", args)
     reason = _redact(
         _require_text(args, "reason", "reason is required — explain what input you need"))
@@ -892,6 +915,7 @@ def _handle_heartbeat(args: dict, **kw) -> str:
 @_kanban_handler("kanban_comment")
 def _handle_comment(args: dict, **kw) -> str:
     """Append a comment to a task's thread."""
+    _authorize_packet_handler("kanban_comment", args)
     _reject_delegated_child_mutation("kanban_comment")
     tid = args.get("task_id")
     _check(tid, "task_id is required (use the current task id if that's what "

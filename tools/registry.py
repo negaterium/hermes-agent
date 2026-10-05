@@ -11,6 +11,7 @@ import importlib
 import inspect
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -894,6 +895,12 @@ class ToolRegistry:
         self, name: str, args: dict, *, scope: Optional[str] = None, **kwargs) -> str | dict:
         """Execute a tool handler by name: async handlers bridged via ``_run_async()``,
         results normalized, every exception returned as ``{"error": ...}``."""
+        if os.environ.get("HERMES_KANBAN_PACKET_WORKER") == "1":
+            try:
+                from hermes_cli.kanban_packet_startup import assert_packet_tool_allowed
+                assert_packet_tool_allowed(name)
+            except Exception as e:
+                return tool_error(f"Packet worker dispatch refused: {e}")
         entry = self.get_entry(name, scope=scope)
         if not entry:
             return tool_error(f"Unknown tool: {name}")

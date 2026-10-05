@@ -583,7 +583,10 @@ def discover_mcp_tools(allowed_mcp_names: Optional[List[str]] = None) -> List[st
     ``allowed_mcp_names``: spawn only the MCP servers named in it (built-in toolset names in the
     list simply don't match); ``None`` spawns every configured server. Used by
     ``hermes -z -t <toolsets>`` to skip cold-starting servers the caller doesn't need (10-60s
-    each); it only affects which servers start, not which names ``-t`` validation can see."""
+    list); it only affects which servers start, not which names ``-t`` validation can see."""
+    from hermes_cli.kanban_packet_startup import packet_worker_enabled
+    if packet_worker_enabled():
+        return []
     with _owner_secret_scope():
         servers = _config._load_mcp_config()
     if not servers:

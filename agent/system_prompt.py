@@ -290,7 +290,8 @@ def _tool_guidance_block(agent: Any) -> Optional[str]:
     # fallback paths must also limit task protocol guidance to dispatcher workers.
     _kanban_guidance = getattr(agent, "_kanban_worker_guidance", None)
     if _kanban_guidance is None and "kanban_show" in names and owned_kanban_task():
-        _kanban_guidance = KANBAN_GUIDANCE
+        from hermes_cli.kanban_packet_startup import PACKET_KANBAN_GUIDANCE, packet_worker_enabled
+        _kanban_guidance = PACKET_KANBAN_GUIDANCE if packet_worker_enabled() else KANBAN_GUIDANCE
     tool_guidance = [
         memory_guidance,
         SESSION_SEARCH_GUIDANCE if "session_search" in names else None,
@@ -303,6 +304,9 @@ def _tool_guidance_block(agent: Any) -> Optional[str]:
 def _skills_prompt(agent: Any, skill_query: Optional[str] = None) -> str:
     """Skills index (empty without skills tools).  Focus mode demotes non-coding
     categories to names-only — never hidden, every name stays visible."""
+    from hermes_cli.kanban_packet_startup import packet_worker_enabled
+    if packet_worker_enabled():
+        return ""
     if not any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage']):
         return ""
     import model_tools
@@ -325,6 +329,9 @@ def _auto_load_parts(agent: Any) -> List[str]:
     Same gate as ``_skills_prompt``: nothing without the skills toolset, and nothing for agents that skip
     context files (delegate children, curator/review forks, gateway hygiene agents) — pinned skills are
     operator guidance for the user's session, not payload for every internal fork."""
+    from hermes_cli.kanban_packet_startup import packet_worker_enabled
+    if packet_worker_enabled():
+        return []
     if getattr(agent, "skip_context_files", False) or not any(
             name in agent.valid_tool_names for name in ("skills_list", "skill_view", "skill_manage")):
         return []

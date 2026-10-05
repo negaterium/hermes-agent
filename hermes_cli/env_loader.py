@@ -461,6 +461,11 @@ def load_hermes_dotenv(
 ) -> list[Path]:
     """Load Hermes env files: ``~/.hermes/.env`` overrides stale shell exports; project ``.env`` is a dev
     fallback that only fills gaps when the user env exists (and overrides shell vars when it does not)."""
+    # Packet workers receive a complete, dispatcher-bound environment.  A
+    # dotenv read here would reopen a configuration and secret channel after
+    # native preflight pinned the worker policy.
+    if os.environ.get("HERMES_KANBAN_PACKET_WORKER") == "1":
+        return []
     # Process home on purpose (never the per-turn override): a startup .env load must not follow a routed
     # profile — see the multiplex guard below.
     from hermes_constants import get_process_hermes_home

@@ -71,6 +71,10 @@ class WebhookTarget(_ToolMatcherMixin):
 def register_from_config(cfg: Optional[Dict[str, Any]]) -> List[WebhookTarget]:
     """Register every configured outbound webhook on the plugin manager.  Malformed ``hooks.outbound``
     means zero targets — never raises.  Returns the targets that ended up wired (deduplicated)."""
+    from hermes_cli.kanban_packet_startup import packet_worker_enabled
+    if packet_worker_enabled():
+        logger.info("Packet worker: outbound webhook registration disabled")
+        return []
     if not isinstance(cfg, dict):
         return []
     from utils import env_var_enabled
