@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import Any, Optional
 
@@ -596,7 +596,7 @@ async def start_whatsapp_onboarding(body: WhatsAppOnboardingStart):
         expires_at_ts = time.time() + _WHATSAPP_ONBOARDING_TTL_SECONDS
         fields = dict(
             proc=None, mode=mode, allowed_users=allowed_users, session_path=str(session_path),
-            expires_at=datetime.fromtimestamp(expires_at_ts, timezone.utc).isoformat().replace("+00:00", "Z"),
+            expires_at=datetime.fromtimestamp(expires_at_ts, UTC).isoformat().replace("+00:00", "Z"),
             expires_at_ts=expires_at_ts, profile=body.profile,
         )
         creds_path = session_path / "creds.json"
@@ -691,9 +691,9 @@ _TELEGRAM_INCOMPLETE_RESPONSE = "Telegram setup service returned an incomplete r
 
 def _parse_expiry_ts(value: str) -> float:
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.replace(tzinfo=UTC)
         return parsed.timestamp()
     except Exception:
         return time.time() + 600
