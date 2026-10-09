@@ -17,9 +17,9 @@ def test_aiagent_initializes_tool_guardrails_from_config_without_warning():
 
     with (
         patch("hermes_cli.config.load_config", return_value=cfg),
-        patch("run_agent.get_tool_definitions", return_value=[]),
-        patch("run_agent.check_toolset_requirements", return_value={}),
-        patch("run_agent.OpenAI"),
+        patch("model_tools.get_tool_definitions", return_value=[]),
+        patch("model_tools.check_toolset_requirements", return_value={}),
+        patch("agent.process_bootstrap.OpenAI"),
         patch("run_agent.logger.warning") as mock_warning,
     ):
         from run_agent import AIAgent

@@ -22,7 +22,7 @@ def _pin_and_resolve(cfg: dict, names: list[str]) -> tuple[set[str], set[str] | 
 def test_toolset_pin_is_what_the_runtime_reads():
     cfg: dict = {}
     resolved, pinned = _pin_and_resolve(cfg, ["web"])
-    assert resolved == {"web"}, f"runtime resolved {sorted(resolved)} for a [web] pin"
+    assert resolved == {"knowledge", "web"}, f"runtime resolved {sorted(resolved)} for a [web] pin"
     assert pinned == {"web"}
     assert "enabled_toolsets" not in (cfg.get("tools") or {}), "writer must not leave the phantom key behind"
 
@@ -33,7 +33,7 @@ def test_toolset_pin_round_trips_a_then_b_then_a(second):
     first, _ = _pin_and_resolve(cfg, ["web"])
     _pin_and_resolve(cfg, second)
     again, pinned = _pin_and_resolve(cfg, ["web"])
-    assert first == again == {"web"}
+    assert first == again == {"knowledge", "web"}
     assert pinned == {"web"}
 
 

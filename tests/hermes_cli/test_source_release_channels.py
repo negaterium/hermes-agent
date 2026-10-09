@@ -47,6 +47,11 @@ def releases(tmp_path, monkeypatch, request):
     git(checkout, "config", "commit.gpgsign", "false")
     git(checkout, "checkout", "--detach", commits[0])
     monkeypatch.setattr(main, "PROJECT_ROOT", checkout)
+    # The release fixture intentionally runs against a temporary checkout.
+    monkeypatch.setattr(
+        "hermes_cli.update_owning_install.retarget_to_owning_install",
+        lambda _root: None,
+    )
     monkeypatch.setenv("HERMES_INSTALL_ROOT", str(checkout))
     monkeypatch.delenv("HERMES_MANAGED", raising=False)
 

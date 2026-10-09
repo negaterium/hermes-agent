@@ -33,6 +33,10 @@ _CHILD = textwrap.dedent('''
     from pathlib import Path
     root_checkout, cell, mode = sys.argv[1:4]
     sys.path.insert(0, root_checkout)
+    # ``source`` is a disposable checkout whose completion path is under test;
+    # do not retarget the child into the interpreter's owning installation.
+    from hermes_cli import update_owning_install
+    update_owning_install.retarget_to_owning_install = lambda _root: None
     cell = Path(cell)
     source = cell / "source"
     source.mkdir()

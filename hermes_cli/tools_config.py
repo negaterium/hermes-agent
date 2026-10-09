@@ -617,7 +617,11 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
     else:
         enabled_toolsets = _composite_toolsets(toolset_names, platform, explicitly_configured)
 
-    _recover_platform_native_toolsets(enabled_toolsets, platform, skip=configurable_keys | plugin_ts_keys | platform_default_keys)
+    # An explicitly saved empty list is a fail-closed zero-tool state. Do not
+    # recover non-configurable native toolsets (such as DarkServer's knowledge
+    # toolset) onto it.
+    if not (explicitly_configured and not toolset_names):
+        _recover_platform_native_toolsets(enabled_toolsets, platform, skip=configurable_keys | plugin_ts_keys | platform_default_keys)
     if plugin_ts_keys:
         enabled_toolsets |= _enabled_plugin_toolsets(config, platform, toolset_names, plugin_ts_keys)
 
