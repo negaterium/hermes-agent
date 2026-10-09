@@ -2222,9 +2222,12 @@ def _run_agent_with_watchdog(
 
 
 def _final_response_from_result(result: dict, job_id: str, job_name: str, AIAgent) -> str:
-    """Deliverable final response from a ``run_conversation`` result. Raises RuntimeError on
-    `failed=True`/`completed=False`: the error text may sit in `final_response` and would otherwise
-    be delivered as the reply with the job marked ok."""
+    """Return the deliverable response, rejecting failed or non-handoff incomplete turns.
+
+    A non-failed max-iteration handoff is still a deliverable checkpoint. The
+    scheduler applies its separate partial-run bookkeeping policy after this
+    extractor returns.
+    """
     # If the agent itself reported failure (e.g. all retries exhausted on API errors, model abort, mid-run
     # interrupt), do not silently mark the job as successful. run_agent populates
     # `failed=True`/`completed=False` on these paths and may put the error into `final_response`, which
@@ -2236,9 +2239,10 @@ def _final_response_from_result(result: dict, job_id: str, job_name: str, AIAgen
     if result.get("failed") is True or (result.get("completed") is False and not max_iteration_summary):
         raise RuntimeError(result.get("error") or final_response_text or "agent reported failure")
     if max_iteration_summary:
-        raise RuntimeError(
-            f"{PARTIAL_RUN_MARKER} Agent reached the iteration limit before "
-            f"terminal completion: {turn_exit_reason}"
+        logger.warning(
+            "Job '%s' reached the iteration limit but produced a final fallback response; "
+            "delivering the response instead of failing the cron run",
+            job_name,
         )
 
     final_response = result.get("final_response", "") or ""
@@ -2766,6 +2770,14 @@ def run_job(
             agent, prompt, job, job_id, job_name, scope.task_id, cancel_event,
             worker_state=_worker_state)
         final_response = _final_response_from_result(result, job_id, job_name, AIAgent)
+        if is_max_iteration_handoff(result):
+            # Keep the fork's explicit partial status and failure-marker contract,
+            # while letting the extractor above return the checkpoint for callers
+            # that need the actual deliverable response.
+            raise RuntimeError(
+                f"{PARTIAL_RUN_MARKER} Agent reached the iteration limit before "
+                f"terminal completion: {result.get('turn_exit_reason') or ''}"
+            )
         if (setup.fallback_notice and final_response.strip() and not _is_cron_silence_response(final_response)
                 and _cron_failure_marker_error(final_response) is None):
             # Pre-agent provider switch (#74349) rides with the delivered report; silence and the

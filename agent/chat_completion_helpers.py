@@ -1234,7 +1234,7 @@ def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs
     # large-context floor, hard ceiling and TTFB scale-up/cap below must not tighten it.
     base_url = getattr(agent, "base_url", None)
     local = bool(base_url) and is_local_endpoint(base_url)
-    if codex and openai_codex_backend and not local:
+    if codex and not local:
         # Raise the stale floor for large payloads so healthy gateway-scale
         # requests aren't aborted mid-prefill.
         codex_floor = openai_codex_stale_timeout_floor(
