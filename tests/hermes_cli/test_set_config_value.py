@@ -433,7 +433,6 @@ class TestCronModelChangeNotice:
         capsys.readouterr()
         set_config_value("model.default", "new-model")
 
-        import yaml
         reloaded = yaml.safe_load(_read_config(_isolated_hermes_home))
         captured = capsys.readouterr()
         assert reloaded["cron"]["model_drift_guard"] is False
