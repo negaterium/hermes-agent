@@ -665,6 +665,7 @@ class Task:
     block_kind: Optional[str] = None
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
+    worker_contract: Optional[str] = None  # Trusted pre-dispatch pin, never model-editable.
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -694,7 +695,7 @@ _TASK_REQUIRED_COLUMNS = (
 _TASK_OPTIONAL_COLUMNS = (
     "branch_name", "project_id", "tenant", "result", "idempotency_key", "worker_pid",
     "max_runtime_seconds", "last_heartbeat_at", "current_run_id", "workflow_template_id",
-    "current_step_key", "max_retries", "session_id", "completion_contract",
+    "current_step_key", "max_retries", "session_id", "completion_contract", "worker_contract",
 )
 # Text columns where "" is stored/read as "not set".
 _TASK_EMPTY_IS_NULL_COLUMNS = (
@@ -899,7 +900,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- ``blocked`` so a cron can't spin it forever. Reset to 0 only on a
     -- successful completion — NOT on unblock (resetting on unblock is exactly
     -- the amnesia that let the loop run unbounded).
-    block_recurrences    INTEGER NOT NULL DEFAULT 0
+    block_recurrences    INTEGER NOT NULL DEFAULT 0,
+    -- Versioned trusted worker policy, distinct from completion evidence. NULL = generic.
+    worker_contract      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -2193,9 +2196,25 @@ def _claim_and_open_run(
     return run_id
 
 
+def pin_worker_contract(conn: sqlite3.Connection, task_id: str, *, worker_profile: str,
+                        worker_config, source_status: str = "ready"):
+    """Trusted pre-dispatch read/pin; not a model create/edit API.
+
+    worker_config MUST come from a successful strict lookup of worker_profile's
+    configuration. None means lookup failure, not absent optional keys. The
+    caller owns strict config I/O; never pass fallback defaults after failure.
+    No run/event is opened here. Claim callers must revalidate in their own txn.
+    """
+    with write_txn(conn):
+        from hermes_cli.kanban_db_worker_contract import pin_in_transaction
+        return pin_in_transaction(conn, task_id, worker_profile=worker_profile,
+                                  worker_config=worker_config, source_status=source_status)
+
+
 def claim_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
+    worker_profile: Optional[str] = None, worker_config=None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
@@ -2206,6 +2225,10 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        from hermes_cli.kanban_db_worker_contract import pin_in_transaction
+        if pin_in_transaction(conn, task_id, worker_profile=worker_profile,
+                              worker_config=worker_config, allow_generic=True) is None:
+            return None
         # Single enforcement point: never ready -> running with an undone
         # parent, whichever writer set 'ready'. Demote to 'todo';
         # recompute_ready re-promotes when the parents finish.
@@ -2231,6 +2254,7 @@ def claim_task(
 def claim_review_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
+    worker_profile: Optional[str] = None, worker_config=None,
 ) -> Optional[Task]:
     """Atomic ``review -> running`` (None when lost). Parents are re-checked
     (one may have reopened meanwhile) and a NEW run tracks the reviewer
@@ -2239,6 +2263,11 @@ def claim_review_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        from hermes_cli.kanban_db_worker_contract import pin_in_transaction
+        if pin_in_transaction(conn, task_id, worker_profile=worker_profile,
+                              worker_config=worker_config, source_status="review",
+                              allow_generic=True) is None:
+            return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
                 "UPDATE tasks SET status = 'todo' "
@@ -4441,6 +4470,7 @@ from hermes_cli.kanban_db_dispatch import (
     DispatchResult,
     _clear_failure_counter,
     _defer_reclaim_for_live_worker,
+    _memory_pressure_level,
     _pid_alive,
     _record_task_failure,
     _terminate_reclaimed_worker,

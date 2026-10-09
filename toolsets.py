@@ -12,6 +12,8 @@ _HERMES_CORE_TOOLS = [
     "web_search", "web_extract",
     "terminal", "process_manage",
     "read_file", "write_file", "patch", "search_files",
+    # Local knowledge recall
+    "knowledge_search", "knowledge_read",
     "vision_analyze", "image_generate",
     "skills_list", "skill_view", "skill_manage",
     "browser_navigate", "browser_snapshot", "browser_click",
@@ -22,10 +24,11 @@ _HERMES_CORE_TOOLS = [
     "browser_exec",  # replaces the other browser tools when browser.backend is "browser-use"
     "text_to_speech",
     "todo_list", "memory",
-    "session_search",
+    "session_search", "session_list", "session_read",
     "clarify",
     "execute_code", "delegate_task",
     "cronjob_manage",
+    "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
     "kanban_show", "kanban_list",
     "kanban_complete", "kanban_block", "kanban_request_review",
     "kanban_request_changes",
@@ -40,6 +43,7 @@ _HERMES_CORE_TOOLS = [
 
 # Webhook payloads are untrusted third-party content: no file/system execution.
 _HERMES_WEBHOOK_SAFE_TOOLS = ["web_search", "web_extract", "vision_analyze", "clarify"]
+_HA_TOOLS = ["ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service"]
 _FEISHU_TOOLS = [
     "feishu_doc_read", "feishu_drive_list_comments", "feishu_drive_list_comment_replies",
     "feishu_drive_reply_comment", "feishu_drive_add_comment",
@@ -63,8 +67,8 @@ def _core_without(*excluded, kanban=True):
 
 
 # Coding posture: everything you reach for while pairing on code; drops messaging,
-# tts, image_gen, cron, kanban and computer-use.
-_CODING_TOOLS = _core_without("image_generate", "text_to_speech", "cronjob_manage", "computer_use", kanban=False)
+# tts, image_gen, home-assistant, cron, kanban and computer-use.
+_CODING_TOOLS = _core_without("image_generate", "text_to_speech", "cronjob_manage", "computer_use", *_HA_TOOLS, kanban=False)
 
 # Toolsets a CLIENT adds to its own sessions (tui_gateway/server.py::_gui_surface_toolsets), never
 # config: another surface lacking them made no configuration choice.
@@ -124,11 +128,12 @@ TOOLSETS = {
         "search (content + files)",
         ["read_file", "write_file", "patch", "search_files"],
     ),
+    "knowledge": _ts("Local knowledge-base recall tools backed by qmd", ["knowledge_search", "knowledge_read"]),
     "tts": _ts("Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, OpenAI, or xAI", ["text_to_speech"]),
     "todo": _ts("Task planning and tracking for multi-step work", ["todo_list"]),
     "memory": _ts("Persistent memory across sessions (personal notes + user profile)", ["memory"]),
     "context_engine": _ts("Runtime tools exposed by the active context engine"),
-    "session_search": _ts("Search and recall past conversations with summarization", ["session_search"]),
+    "session_search": _ts("Search and recall past conversations with summarization", ["session_search", "session_list", "session_read"]),
     "connections": _ts("Remote connector discovery, execution, and account authorization", ["manage_connections"]),
     "project": _ts("Desktop Projects — create/switch named workspaces (GUI sessions only)", ["desktop_project"]),
     "bot_room": _ts("Verified text-only Group Chat turn capabilities"),
@@ -156,6 +161,7 @@ TOOLSETS = {
     "clarify": _ts("Ask the user clarifying questions (multiple-choice or open-ended)", ["clarify"]),
     "code_execution": _ts("Run Python scripts that call tools programmatically (reduces LLM round trips)", ["execute_code"]),
     "delegation": _ts("Spawn subagents with isolated context for complex subtasks", ["delegate_task"]),
+    "homeassistant": _ts("Home Assistant smart home control and monitoring", _HA_TOOLS),
     "kanban": _ts(
         "Kanban multi-agent coordination — only active when the agent is spawned by "
         "the kanban dispatcher (HERMES_KANBAN_TASK env set). The dispatcher runs "
@@ -215,6 +221,7 @@ TOOLSETS = {
     "hermes-slack": _bundle("Slack bot toolset - full access for workspace use (terminal has safety checks)"),
     "hermes-signal": _bundle("Signal bot toolset - encrypted messaging platform (full access)"),
     "hermes-bluebubbles": _bundle("BlueBubbles iMessage bot toolset - Apple iMessage via local BlueBubbles server"),
+    "hermes-homeassistant": _bundle("Home Assistant bot toolset - smart home event monitoring and control"),
     "hermes-email": _bundle("Email bot toolset - interact with Hermes via email (IMAP/SMTP)"),
     "hermes-mattermost": _bundle("Mattermost bot toolset - self-hosted team messaging (full access)"),
     "hermes-matrix": _bundle("Matrix bot toolset - decentralized encrypted messaging (full access)"),
@@ -237,7 +244,7 @@ TOOLSETS = {
         [],
         includes=[
             "hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack",
-            "hermes-signal", "hermes-bluebubbles", "hermes-email",
+            "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email",
             "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk",
             "hermes-feishu", "hermes-wecom", "hermes-wecom-callback", "hermes-weixin",
             "hermes-qqbot", "hermes-webhook", "hermes-yuanbao",

@@ -912,12 +912,16 @@ def _restart_macos_launchd_gateways(
     cannot leave the rest of the fleet on old code (#68523).
     """
     from hermes_cli.gateway import (
-        get_launchd_label, get_launchd_plist_path, launchd_gateway_labels_for_install, legacy_launchd_labels_for_install,
+        get_launchd_label, get_launchd_plist_path, launchd_gateway_labels_for_install,
+        legacy_launchd_labels_for_install,
         _graceful_restart_via_sigusr1, _launchd_kickstart,
         _locate_launchd_gateway_service, _wait_for_launchd_service_pid,
     )
+    current_label = get_launchd_label()
     if require_supervision:
-        listing = subprocess.run(["launchctl", "list"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
+        listing = subprocess.run(
+            ["launchctl", "list"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=10)
         if listing.returncode != 0:
             failed_or_stale_units.append("launchd (listing failed)")
             return

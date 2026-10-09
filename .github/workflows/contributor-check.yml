@@ -2,6 +2,12 @@ name: Contributor Attribution Check
 
 on:
   workflow_call:
+    inputs:
+      base_ref:
+        description: "Target branch to use as the contributor-attribution base"
+        type: string
+        required: false
+        default: main
     outputs:
       review_status:
         description: "JSON array of review status objects"
@@ -24,8 +30,16 @@ jobs:
       - name: Check for unmapped contributor emails
         id: check-emails
         run: |
-          # Get the merge base between this PR and main
-          MERGE_BASE=$(git merge-base origin/main HEAD)
+          # Get the merge base between this PR and its actual target branch.
+          # Reusable workflows receive the target through the caller because
+          # github.base_ref is not reliable after the workflow_call boundary.
+          BASE_REF_NAME="${{ inputs.base_ref }}"
+          if [ -z "$BASE_REF_NAME" ]; then
+            BASE_REF_NAME=main
+          fi
+          BASE_REF="origin/${BASE_REF_NAME}"
+          echo "Attribution base: ${BASE_REF}"
+          MERGE_BASE=$(git merge-base "$BASE_REF" HEAD)
 
           # Find any new author emails in this PR's commits
           NEW_EMAILS=$(git log ${MERGE_BASE}..HEAD --format='%ae' --no-merges | sort -u)
