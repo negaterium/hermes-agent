@@ -57,6 +57,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -102,6 +103,21 @@ def _runner_scratch_root() -> str:
     later makedirs/mkdtemp here fail with EPERM for every other user on the host, with no way
     back that does not need root. Keying by uid means no run is blocked by another's leftovers.
     """
+    configured = os.environ.get("HERMES_TEST_SCRATCH_ROOT", "")
+    if configured:
+        selected = Path(configured)
+        if not selected.is_absolute():
+            raise ValueError("test scratch root must be absolute")
+        selected = selected.resolve()
+        from hermes_state_guard import _real_platform_state_root
+
+        native = _real_platform_state_root()
+        if native is None:
+            raise ValueError("cannot verify the production-home scratch boundary")
+        if selected.is_relative_to(native) and not selected.is_relative_to(native / "cache" / "scratch"):
+            raise ValueError("test scratch root cannot expose production state")
+        os.makedirs(selected, exist_ok=True)
+        return str(selected)
     name = "hermes-pytest" + (f"-{os.getuid()}" if hasattr(os, "getuid") else "")
     if os.name == "nt" or not os.path.isdir("/var/tmp"):  # no-tmp: ok — probing the disk-backed FHS root
         root = os.path.join(tempfile.gettempdir(), name)
@@ -527,6 +543,26 @@ _FLAKY_RESULTS: List[Tuple[Path, str]] = []
 _flaky_lock = threading.Lock()
 
 
+def _runner_file_environment(file: Path) -> tuple[str, dict[str, str]]:
+    """Create attempt-local provenance; nested runners always replace inherited bindings."""
+    env = os.environ.copy()
+    temproot = tempfile.mkdtemp(prefix="r-", dir=_runner_scratch_root())
+    env["PYTEST_DEBUG_TEMPROOT"] = temproot
+    env["TMPDIR"] = temproot
+    if env.get("HERMES_TEST_SCRATCH_ROOT"):
+        binding = json.dumps({"root": str(Path(temproot).resolve()),
+                              "file": str(file.resolve()), "id": uuid.uuid4().hex})
+        try:
+            (Path(temproot) / ".runner-ownership.json").write_text(binding, encoding="utf-8")
+        except BaseException:
+            _rmtree_force(temproot)
+            raise
+        env["HERMES_TEST_RUN_BINDING"] = binding
+    else:
+        env.pop("HERMES_TEST_RUN_BINDING", None)
+    return temproot, env
+
+
 def _run_one_file_once(
     file: Path,
     pytest_args: List[str],
@@ -552,12 +588,8 @@ def _run_one_file_once(
     #
     # One root for each subprocess removes the shared directory that the race
     # needs. The parent deletes the root after the attempt.
-    env = os.environ.copy()
-    temproot = tempfile.mkdtemp(prefix="r-", dir=_runner_scratch_root())
-    env["PYTEST_DEBUG_TEMPROOT"] = temproot
-    # Every tempfile.* call inside the test process lands in the same per-run root, so the
-    # parent's cleanup of ``temproot`` removes them too instead of leaving them in /tmp.
-    env["TMPDIR"] = temproot
+    temproot, env = _runner_file_environment(file)
+    # The ownership record is inside this root and follows the same cleanup lifetime.
 
     subproc_start = time.monotonic()
     # launch the pytest process

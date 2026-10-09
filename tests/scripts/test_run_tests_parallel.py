@@ -47,6 +47,9 @@ def _probe_root(tmp_path):
     shutil.copy2(real / "run_tests_parallel.py", scripts)
     # The runner shares the platforms() spec resolver with the CI lane selector.
     shutil.copy2(real / "ci" / "list_os_marked_tests.py", scripts / "ci")
+    # Explicit scratch validation and stale-root cleanup use these real stdlib helpers.
+    for module in ("hermes_state_guard.py", "hermes_constants_scratch.py"):
+        shutil.copy2(real.parent / module, root)
     return root
 
 
@@ -621,6 +624,8 @@ def test_scratch_root_is_per_user(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.syspath_prepend(str(scripts_dir))
     runner = importlib.import_module("run_tests_parallel")
 
+    # This test exercises the default branch, not the enclosing runner's explicit root.
+    monkeypatch.delenv("HERMES_TEST_SCRATCH_ROOT", raising=False)
     # Exercise the non-/var/tmp arm so the probe never mints roots in the real shared dir.
     # (Narrow: on 3.14 ``Path.is_dir()`` itself goes through ``os.path.isdir``.)
     monkeypatch.setattr(runner.tempfile, "gettempdir", lambda: str(tmp_path))
