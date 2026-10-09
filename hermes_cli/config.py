@@ -1263,6 +1263,14 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
                    f"Root-level key '{key}' looks misplaced — should it be under 'model:' or inside a 'custom_providers' entry?",
                    f"Move '{key}' under the appropriate section")
 
+    if "kanban" in config:
+        from hermes_cli.kanban_worker_policy import PolicyError, policy_from_config
+        try:
+            policy_from_config(config, "default")
+        except PolicyError as exc:
+            _issue(issues, "error", f"Invalid kanban worker policy: {exc}",
+                   "Use worker_contract: standard or packet-only-v1 and a resolvable parent_acceptor_profile")
+
     _validate_web_backends(config, issues)
     _validate_quoted_containers(config, issues)
     return issues
