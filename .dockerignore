@@ -6,7 +6,9 @@
 
 # Python
 __pycache__
+**/__pycache__/
 *.py[cod]
+**/*.py[cod]
 *$py.class
 *.so
 .Python
@@ -15,6 +17,8 @@ dist/
 build/
 !scripts/build/
 !scripts/build/**
+scripts/build/**/__pycache__/
+scripts/build/**/*.py[cod]
 
 # Virtual environments
 venv/
@@ -31,7 +35,11 @@ node_modules
 .pip-cache/
 .uv-cache/
 .cache/
+**/.pip-cache/
+**/.uv-cache/
+**/.cache/
 .build/
+**/.build/
 
 # Built artifacts that are regenerated inside the image.  Excluded so local
 # rebuilds on the developer's machine don't invalidate the npm-install layer
@@ -72,8 +80,12 @@ export*
 
 # Testing
 .pytest_cache/
+.pytest-cache/
+**/.pytest_cache/
+**/.pytest-cache/
 .coverage
 htmlcov/
+**/.ruff_cache/
 
 # Documentation
 *.md
