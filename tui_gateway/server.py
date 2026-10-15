@@ -1361,8 +1361,6 @@ _BOOL_WORDS = {
 }
 
 
-
-
 def _restart_slash_worker(sid: str, session: dict):
     # Close the slash-worker subprocess as part of finalize itself, not just in the callers.
     # Defense-in-depth: every session-end path goes through _finalize_session (it's the single
@@ -1705,8 +1703,6 @@ class _RuntimeFallbackResolution(NamedTuple):
     runtime: dict
     selected_model: str | None
     used_fallback: bool
-
-
 
 
 def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | None) -> None:

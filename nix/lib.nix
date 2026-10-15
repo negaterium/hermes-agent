@@ -113,6 +113,14 @@ let
         relPath = lib.removePrefix (toString repoRoot + "/") (toString path);
         components = lib.splitString "/" relPath;
         topComponent = if components == [ ] then "" else builtins.head components;
+        # These two manifests are explicit setuptools data-files inputs. Keep
+        # their parent directories traversable and the files themselves in the
+        # filtered Python source; the rest of the optional MCP catalog stays
+        # excluded so unrelated catalog edits do not rebuild the venv.
+        optionalMcpDataFiles = [
+          "optional-mcps/linear/manifest.yaml"
+          "optional-mcps/unreal-engine/manifest.yaml"
+        ];
         excludedDirs =
           # JS/TS workspace directories — derived from the npm workspaces
           # so a new workspace member is excluded from the Python source
@@ -142,12 +150,10 @@ let
             # This keeps SKILL.md edits from rebuilding the Python venv.
             "skills"
             "optional-skills"
-            # locales/ and optional-mcps/ are bare data dirs (no
-            # __init__.py) shipped via symlinks + HERMES_BUNDLED_LOCALES
-            # / HERMES_OPTIONAL_MCPS, not via the wheel. Excluding them
-            # keeps catalog edits from rebuilding the Python venv.
+            # locales/ is a bare data dir (no __init__.py) shipped via
+            # symlinks + HERMES_BUNDLED_LOCALES, not via the wheel. Excluding
+            # it keeps catalog edits from rebuilding the Python venv.
             "locales"
-            "optional-mcps"
           ];
         excludedFiles = [
           # JS root manifests
@@ -179,6 +185,9 @@ let
         false
       else if builtins.elem relPath excludedFiles then
         false
+      else if topComponent == "optional-mcps" then
+        # Keep only the manifests named by [tool.setuptools.data-files].
+        lib.any (dataFile: dataFile == relPath || lib.hasPrefix "${relPath}/" dataFile) optionalMcpDataFiles
       else if builtins.elem topComponent excludedDirs then
         false
       else

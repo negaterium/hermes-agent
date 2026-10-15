@@ -294,6 +294,7 @@ jobs:
     uses: ./.github/workflows/contributor-check.yml
     with:
       commit: ${{ inputs.commit }}
+      base_ref: ${{ github.base_ref }}
 
   uv-lockfile:
     name: Check uv.lock

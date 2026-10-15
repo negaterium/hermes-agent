@@ -18,6 +18,14 @@ import pytest
 pytestmark = pytest.mark.platforms("posix")
 
 
+@pytest.fixture(autouse=True)
+def standalone_permission_policy(monkeypatch):
+    """Owner-only assertions exercise non-container defaults, not a bind-mounted runtime."""
+    monkeypatch.setattr("hermes_constants._detect_container", lambda: False)
+    for name in ("HERMES_CONTAINER", "HERMES_SKIP_CHMOD", "HERMES_HOME_MODE", "HERMES_MANAGED"):
+        monkeypatch.delenv(name, raising=False)
+
+
 class TestCronFilePermissions(unittest.TestCase):
     """Verify cron files get secure permissions."""
 

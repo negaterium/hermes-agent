@@ -47,8 +47,10 @@ def _contains(path: str, prefix: str) -> bool:
 
 
 class HomeIOGuard:
-    def __init__(self, roots, installed_apps=lambda: ()):
+    def __init__(self, roots, installed_apps=lambda: (), *, runner_temp_root=None, runner_native_root=None):
         self.roots = roots
+        self.runner_temp_root = runner_temp_root
+        self.runner_native_root = runner_native_root
         # The machine's installed desktop app (``packaged_gui_app_paths()`` before any test ran):
         # deleting, replacing or writing into it is refused. Reads stay allowed: several update
         # paths only probe it.
@@ -82,6 +84,17 @@ class HomeIOGuard:
                 return
             resolved = self._refuse_installed_app_change(value, absolute) if destructive else None
             roots = tuple(_normcase(os.fspath(r)) for r in self.roots())
+            if self.runner_temp_root is not None and self.runner_native_root is not None:
+                scratch = _normcase(os.fspath(self.runner_temp_root))
+                native = _normcase(os.fspath(self.runner_native_root))
+                real = _normcase(os.path.realpath(absolute))
+                owned = _within(absolute, scratch) and _within(real, scratch)
+                # realpath walks ancestors; this grants metadata only, never directory I/O.
+                ancestor = metadata and _contains(absolute, scratch) and _contains(real, scratch)
+                if _within(scratch, native) and (owned or ancestor):
+                    # Only the snapshotted native boundary has an owned-subtree exception.
+                    # Dynamic/custom roots, including roots inside this subtree, still deny I/O.
+                    roots = tuple(root for root in roots if root != native)
             # Resolving the root itself (get_default_hermes_root's relative_to
             # probe) reads no state; only its contents are guarded.
             if metadata and absolute in roots:

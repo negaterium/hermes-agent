@@ -249,6 +249,12 @@ class TestSetChannelCLI:
         monkeypatch.setattr(socket.socket, "connect", _denied("socket.connect"))
         # Real root, real filesystem — but a temp one, never the checkout.
         monkeypatch.setenv("HERMES_INSTALL_ROOT", str(tmp_path))
+        # The command under test targets this synthetic install; do not hand
+        # the test process back to the repository's owning installation.
+        monkeypatch.setattr(
+            "hermes_cli.update_owning_install.retarget_to_owning_install",
+            lambda _root: None,
+        )
 
     def _home(self, tmp_path, monkeypatch):
         home = tmp_path / ".hermes"
