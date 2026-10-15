@@ -404,6 +404,9 @@ def _load_enabled_toolsets(platform: str | None = None) -> list[str] | None:
                 cfg = load_config()
                 if _platform_toolsets_explicitly_saved(cfg, session_platform):
                     selection = _get_platform_tools(cfg, session_platform, include_default_mcp_servers=True)
+                    # An explicit zero-tool selection must bypass client-surface fold-in.
+                    if not selection:
+                        return []
                 return sorted(_with_session_toolsets(selection, session_platform))
     try:
         from toolsets import validate_toolset
