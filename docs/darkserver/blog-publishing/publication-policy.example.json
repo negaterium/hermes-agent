@@ -1,0 +1,5 @@
+{
+  "publication_mode": "review_only",
+  "reason": "Unpublished editorial pilots require owner review before automatic publication resumes.",
+  "resume_requires": "Explicit owner approval after pilot review. Never switch to live or resume automatically."
+}

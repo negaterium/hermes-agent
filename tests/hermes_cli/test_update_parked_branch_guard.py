@@ -87,6 +87,12 @@ def _no_config(monkeypatch):
     import hermes_cli.config as hermes_config
 
     monkeypatch.setattr(hermes_config, "load_config", dict)
+    # The command-path tests below use temporary Git clones, not the owning
+    # checkout from which this test interpreter was launched.
+    monkeypatch.setattr(
+        "hermes_cli.update_owning_install.retarget_to_owning_install",
+        lambda _root: None,
+    )
 
 
 # ---------------------------------------------------------------------------

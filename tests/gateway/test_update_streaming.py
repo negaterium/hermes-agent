@@ -360,6 +360,12 @@ class TestCmdUpdateGatewayMode:
         git("remote", "add", "origin", str(root))
         (root / "notes.txt").write_text("user edit\n", encoding="utf-8")
         monkeypatch.setattr(main, "PROJECT_ROOT", root)
+        # This is a synthetic checkout; keep the test in this process instead of
+        # redirecting it to the interpreter's owning install.
+        monkeypatch.setattr(
+            "hermes_cli.update_owning_install.retarget_to_owning_install",
+            lambda _root: None,
+        )
         # Isolate host/service phases; options, Git, stash and prompt dispatch stay real.
         monkeypatch.setattr(main, "_update_preflight_handled", lambda args: False)
         monkeypatch.setattr(main, "_install_hangup_protection", lambda **kw: None)
