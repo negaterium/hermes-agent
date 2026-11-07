@@ -164,7 +164,7 @@ def guard_durable_memory_content(
 
 
 __all__ = [
-    "DurableMemoryDecision",
     "MAX_DURABLE_MEMORY_CHARS",
+    "DurableMemoryDecision",
     "guard_durable_memory_content",
 ]

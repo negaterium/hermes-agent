@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import threading
@@ -206,9 +207,17 @@ def ensure(name, *, base_env=None, explicit=False, verify=True, progress=None, p
 
 
 def sync_venv(extras=None, *, explicit=False, plugins: PluginInput | None = None, repair=False,
-              project_root: Path | None = None, evict_incompatible_plugins: bool = False) -> None:
+              project_root: Path | None = None, evict_incompatible_plugins: bool = False,
+              expected_facts_sha256: str | None = None,
+              return_facts_sha256: bool = False) -> str | None:
     from pm.environments import running_from_selected_environment
 
+    if (expected_facts_sha256 is not None
+            and (not isinstance(expected_facts_sha256, str)
+                 or not re.fullmatch(r"[a-f0-9]{64}", expected_facts_sha256))):
+        raise ValueError("expected_facts_sha256 must be a lowercase SHA-256 digest")
+    if not isinstance(return_facts_sha256, bool):
+        raise TypeError("return_facts_sha256 must be a bool")
     if extras and not explicit and not repair and not running_from_selected_environment(
             paths.repo_root() if project_root is None else Path(project_root)):
         # A lazy extra may only extend the environment this process runs from. From any other
@@ -229,10 +238,14 @@ def sync_venv(extras=None, *, explicit=False, plugins: PluginInput | None = None
     if is_runtime() and not foreign:
         from pm.install import sync_venv as direct
         return direct(extras, explicit=explicit, plugins=plugins, repair=repair,
-                      evict_incompatible_plugins=evict_incompatible_plugins)
-    _request("sync_venv", {"extras": extras, "explicit": explicit, "repair": repair,
-                          "plugins": plugin_inputs.encode(plugins),
-                          "evict_incompatible_plugins": evict_incompatible_plugins}, project_root=project_root)
+                      evict_incompatible_plugins=evict_incompatible_plugins,
+                      expected_facts_sha256=expected_facts_sha256,
+                      return_facts_sha256=return_facts_sha256)
+    return _request("sync_venv", {"extras": extras, "explicit": explicit, "repair": repair,
+                                  "plugins": plugin_inputs.encode(plugins),
+                                  "evict_incompatible_plugins": evict_incompatible_plugins,
+                                  "expected_facts_sha256": expected_facts_sha256,
+                                  "return_facts_sha256": return_facts_sha256}, project_root=project_root)
 
 
 def ensure_tools_for_sync() -> None:
@@ -393,13 +406,13 @@ def build_requirements_environment(requirements: Sequence[str], *, out: Path,
                                    python: Path | None = None, cache: Path | None = None,
                                    env: Mapping[str, str] | None = None, wheelhouse: Path | None = None,
                                    offline: bool = False, sealed: bool = False,
-                                   explicit: bool = False) -> Path:
+                                   explicit: bool = False, lock: Path | None = None) -> Path:
     if isinstance(requirements, str):
         raise TypeError("requirements must be a sequence, not a string")
     return Path(_python_operation("build_requirements_environment", {
         "requirements": list(requirements), "out": Path(out), "python": python, "cache": cache,
         "env": dict(env) if env is not None else None, "wheelhouse": wheelhouse,
-        "offline": offline, "sealed": sealed, "explicit": explicit,
+        "offline": offline, "sealed": sealed, "explicit": explicit, "lock": lock,
     }))
 
 

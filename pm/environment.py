@@ -8,7 +8,7 @@ from __future__ import annotations
 import codecs
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import io
 import os
 from pathlib import Path
@@ -236,7 +236,7 @@ def managed_environment(destination: Path, *, python: Path | None = None,
 
 
 @contextmanager
-def _fresh_build(environment: PythonEnvironment, *, sealed: bool) -> Iterator[None]:
+def _fresh_build(environment: PythonEnvironment, *, sealed: bool, lock: Path | None = None) -> Iterator[None]:
     """Own only the output claimed by this build, including failed validation."""
     out = environment.destination
     # A concurrent creator wins intact: never enter cleanup before mkdir succeeds.
@@ -244,7 +244,7 @@ def _fresh_build(environment: PythonEnvironment, *, sealed: bool) -> Iterator[No
     try:
         environment.create()
         yield
-        environment.check()
+        environment.check(lock)
         if sealed:
             prune_site_pth(out)
     except BaseException:
@@ -399,19 +399,29 @@ class PythonEnvironment:
         if result.returncode:
             raise classify_uv_failure("export", result.returncode, result.stderr or result.stdout)
 
-    def install_requirements(self, requirements: Sequence[str], *, wheelhouse: Path | None = None) -> None:
+    def install_requirements(self, requirements: Sequence[str], *, wheelhouse: Path | None = None,
+                             lock: Path | None = None) -> None:
         if not requirements:
             return
         # A file avoids command-line length limits and shell/marker quoting.
         with tempfile.TemporaryDirectory(prefix="pm-requirements-") as temporary:
             requirements_file = Path(temporary) / "requirements.txt"
             requirements_file.write_text("\n".join(requirements) + "\n", encoding="utf-8")
-            self._install_requirements_file(requirements_file, wheelhouse=wheelhouse)
+            self._install_requirements_file(requirements_file, wheelhouse=wheelhouse, lock=lock)
 
     def _install_requirements_file(self, requirements: Path, *, wheelhouse: Path | None = None,
-                                   timeout: int = 1800) -> None:
+                                   lock: Path | None = None, timeout: int = 1800) -> None:
+        """Install requirements, reapplying the lock's manifest overrides when supplied."""
         command = ["pip", "install", "--no-config", "--python", str(self.executable),
                    "--requirements", str(requirements)]
+        if lock is not None:
+            from pm.pip_check import override_requirements
+
+            overrides = override_requirements(lock)
+            if overrides:
+                overrides_file = requirements.with_name("overrides.txt")
+                overrides_file.write_text("\n".join(overrides) + "\n", encoding="utf-8")
+                command += ["--overrides", str(overrides_file)]
         if wheelhouse is not None:
             command += ["--no-index", "--only-binary", ":all:",
                         "--find-links", str(wheelhouse.absolute())]
@@ -434,10 +444,17 @@ class PythonEnvironment:
         if result.returncode:
             raise InstallError("uv", f"cache pruning failed: {result.stderr[-600:]}")
 
-    def check(self) -> None:
-        result = self._run(
-            ["pip", "check", "--no-config", "--python", str(self.executable)],
+    def check(self, lock: Path | None = None) -> None:
+        """Validate installed dependencies, allowing only lock-declared overrides."""
+        result = replace(self, output=None)._run(
+            ["pip", "check", "--no-config", "--color", "never", "--python", str(self.executable)],
             cwd=self.destination.parent, timeout=60,
         )
-        if result.returncode:
+        if not result.returncode:
+            return
+        from pm.pip_check import unexpected_incompatibilities
+        unexpected = unexpected_incompatibilities(f"{result.stdout or ''}\n{result.stderr or ''}", lock)
+        if unexpected is None:
             raise InstallError("venv", f"dependency validation failed: {result.stderr[-600:]}")
+        if unexpected:
+            raise InstallError("venv", "dependency validation failed: " + "\n".join(unexpected)[-600:])

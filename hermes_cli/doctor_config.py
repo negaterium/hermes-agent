@@ -311,6 +311,7 @@ def _validate_auxiliary_config(config_path, issues: list) -> None:
     from hermes_cli.config import read_user_config_raw
     from hermes_cli.runtime_provider import resolve_runtime_provider
     from utils import base_url_hostname
+    from agent.auxiliary_client import _normalize_aux_provider
     aux = read_user_config_raw(config_path).get("auxiliary")
     routed = {name: block for name, block in (aux.items() if isinstance(aux, dict) else ())
               if isinstance(block, dict) and str(block.get("provider") or "").strip().lower() not in ("", "auto")}
@@ -318,7 +319,10 @@ def _validate_auxiliary_config(config_path, issues: list) -> None:
     for task, block in sorted(routed.items()):
         provider, model, base_url, api_key = (str(block.get(k) or "").strip() or None for k in ("provider", "model", "base_url", "api_key"))
         try:
-            runtime = resolve_runtime_provider(requested=provider, target_model=model, explicit_api_key=api_key, explicit_base_url=base_url)
+            # Auxiliary tasks accept "main" as an alias for the configured main
+            # provider. Diagnose the same concrete provider that their client uses.
+            requested = _normalize_aux_provider(provider) if provider == "main" else provider
+            runtime = resolve_runtime_provider(requested=requested, target_model=model, explicit_api_key=api_key, explicit_base_url=base_url)
         except Exception as exc:
             _fail_and_issue(f"auxiliary.{task}.provider '{provider}' does not resolve", f"({str(exc).splitlines()[0]})",
                             f"auxiliary.{task}.provider '{provider}' cannot be resolved ({str(exc).splitlines()[0]}); the task "

@@ -51,6 +51,9 @@ ENV PLAYWRIGHT_BROWSERS_PATH="/opt/hermes/.playwright"
 
 WORKDIR /app
 COPY . /app
+# Measure the Docker-filtered COPY payload before npm/PM alter /app. This
+# canonical identity includes uncommitted source without relying on host Python.
+RUN python3 -B /app/deployment/darkserver/context_identity.py /app /opt/hermes/build-context.sha256
 
 # Route HTTPS GitHub authentication through gh. Its token lookup honors
 # GH_CONFIG_DIR above, while the binary/helper itself remains image-managed.
@@ -60,8 +63,10 @@ RUN git config --system credential.https://github.com.helper '!/usr/bin/gh auth 
 # runtime starts without a display, so the headless shell is sufficient and
 # avoids downloading the full browser bundle.  Pinning comes from the checked
 # in package-lock.json; do not use a floating global agent-browser install.
-RUN npm install --workspaces=false --no-audit --fetch-retries=5 \
-    && npm install --no-save --no-audit --fetch-retries=5 playwright@1.58.2 \
+RUN npm ci --workspaces=false --no-audit --fetch-retries=5 \
+    && npm_config_ignore_scripts=true node /app/scripts/build/node-deps.mjs --source /app \
+       --workspace web --workspace ui-tui --workspace ui-tui/packages/hermes-ink --workspace apps/shared \
+    && npm install --workspaces=false --no-save --no-audit --fetch-retries=5 playwright@1.58.2 \
     && node /app/node_modules/playwright/cli.js install --with-deps chromium --only-shell \
     && npm cache clean --force
 
@@ -70,12 +75,20 @@ RUN npm install -g @tobilu/qmd@2.8.3 \
     && node /app/deployment/darkserver/patch-qmd.cjs
 
 # Build a fresh single dependency union through native PM, not raw pip/uv.
+ARG HERMES_BUILD_COMMIT=""
+ARG HERMES_CONTEXT_SHA256=""
 ENV HERMES_RUNTIME_DIR=/app/tools CC=gcc CXX=g++
 RUN touch /app/README.md \
     && python3 -c 'import pm; pm.ensure("uv", explicit=True)' \
-    && python3 -c 'import runpy; runpy.run_path("/app/deployment/darkserver/build.py", run_name="__main__")'
+    && HERMES_BUILD_COMMIT="$HERMES_BUILD_COMMIT" HERMES_CONTEXT_SHA256="$HERMES_CONTEXT_SHA256" \
+       python3 -c 'import runpy; runpy.run_path("/app/deployment/darkserver/build.py", run_name="__main__")'
 ENV PYTHONDONTWRITEBYTECODE=1 HERMES_DISABLE_LAZY_INSTALLS=1 PYTHONPATH=/app
-ENV PATH="/app/venv/bin:$PATH"
+ENV PATH="/app/venv/bin:/app/tools/npm-12.0.2-linux-x64/bin:/app/tools/node-26.7.0-linux-x64/bin:/app/tools/uv-0.12.3-linux-x64:$PATH"
+
+# This deployment serves the dashboard and its embedded TUI from immutable products.
+ENV HERMES_WEB_DIST=/opt/hermes/products/web HERMES_TUI_DIR=/opt/hermes/products/tui
+RUN HERMES_PYTHON=/app/venv/bin/python3 NODE_OPTIONS=--max-old-space-size=4096 RAYON_NUM_THREADS=4 \
+    node /app/deployment/darkserver/build-frontends.mjs --source /app --products /opt/hermes/products
 
 RUN mkdir -p /root/.local/bin \
     && ln -sf /app/venv/bin/hermes /root/.local/bin/hermes \

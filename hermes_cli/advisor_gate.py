@@ -12,7 +12,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 PACKET_VERSION = "advisor.packet.v1"
@@ -107,7 +107,7 @@ class ConsultationDecision:
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _timestamp(value: Any, *, field: str) -> datetime:
@@ -115,19 +115,22 @@ def _timestamp(value: Any, *, field: str) -> datetime:
         raise AdvisorPacketError(f"{field} must be a non-empty ISO-8601 timestamp")
     text = value.strip()
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        # Retain the previous rejection of embedded UTC designators.
+        if "Z" in text[:-1]:
+            raise ValueError("embedded UTC designator")
+        parsed = datetime.fromisoformat(text)
     except ValueError as exc:
         raise AdvisorPacketError(f"{field} must be a valid ISO-8601 timestamp") from exc
     if parsed.tzinfo is None:
         raise AdvisorPacketError(f"{field} must include a timezone")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _timestamp_text(value: str | datetime, *, field: str) -> str:
     parsed = value if isinstance(value, datetime) else _timestamp(value, field=field)
     if parsed.tzinfo is None:
         raise AdvisorPacketError(f"{field} must include a timezone")
-    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return parsed.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _required_text(value: Any, *, field: str, max_chars: int = MAX_TEXT_CHARS) -> str:
@@ -519,7 +522,7 @@ def evaluate_consultation(packet: Any, *, now: datetime | None = None) -> Consul
         )
 
     assert isinstance(packet, Mapping)
-    current = (now or _utc_now()).astimezone(timezone.utc)
+    current = (now or _utc_now()).astimezone(UTC)
     triggers: list[ConsultationTrigger] = []
     high_impact = _is_high_impact(packet)
     if high_impact:

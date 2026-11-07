@@ -168,7 +168,7 @@ class WeComAdapter(WeComStreamMixin, WeComMediaMixin, ChatSendQueueMixin, OwnAcc
             # Tighter keepalive so idle CLOSE_WAIT drains promptly.
             # See #18451.
             from gateway.platforms._http_client_limits import platform_httpx_limits
-            from gateway.platforms.base import _ssrf_redirect_guard
+            from gateway.platforms.base import ssrf_redirect_guard as _ssrf_redirect_guard
             from tools.url_safety import create_ssrf_safe_async_client
             self._http_client = create_ssrf_safe_async_client(timeout=30.0, follow_redirects=True, event_hooks={"response": [_ssrf_redirect_guard]}, limits=platform_httpx_limits())
             await self._open_connection()

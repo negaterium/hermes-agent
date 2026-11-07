@@ -47,7 +47,7 @@ class QmdKnowledgeBackend:
     def is_available(self) -> bool:
         return bool(self._which("qmd"))
 
-    def status(self) -> Dict[str, Any]:
+    def status(self) -> dict[str, Any]:
         env = self._qmd_environment()
         return {
             "success": True,
@@ -57,7 +57,7 @@ class QmdKnowledgeBackend:
             "data_dir": env.get("QMD_DATA_DIR", ""),
         }
 
-    def search(self, query: str, limit: int = 5, mode: str = "semantic") -> Dict[str, Any]:
+    def search(self, query: str, limit: int = 5, mode: str = "semantic") -> dict[str, Any]:
         requested_mode = (mode or "semantic").strip().lower()
         mode = requested_mode
         if mode not in self._MODE_TO_SUBCOMMAND:
@@ -95,7 +95,7 @@ class QmdKnowledgeBackend:
         query: str,
         limit: int,
         requested_mode: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[dict[str, Any]]:
         """Resolve an exact collection-relative path before content search.
 
         QMD's text indexes do not treat document paths as searchable content. A
@@ -151,9 +151,9 @@ class QmdKnowledgeBackend:
             return None
         return ref if self._validate_read_ref(ref) is None else None
 
-    def _search_with_mode(self, query: str, limit: int, mode: str) -> Dict[str, Any]:
+    def _search_with_mode(self, query: str, limit: int, mode: str) -> dict[str, Any]:
         search_query = query
-        search_options: List[str] = []
+        search_options: list[str] = []
         if mode == "semantic":
             # QMD's structured endpoint accepts a single-line vec query and
             # skips its own expansion pass.  Normalize multiline user input
@@ -284,7 +284,7 @@ class QmdKnowledgeBackend:
                 return True
         return False
 
-    def read(self, ref: str) -> Dict[str, Any]:
+    def read(self, ref: str) -> dict[str, Any]:
         validation_error = self._validate_read_ref(ref)
         if validation_error:
             return {"success": False, "error": validation_error}
@@ -299,7 +299,7 @@ class QmdKnowledgeBackend:
             "content": result["stdout"],
         }
 
-    def _run_command(self, cmd: List[str], timeout: int) -> Dict[str, Any]:
+    def _run_command(self, cmd: list[str], timeout: int) -> dict[str, Any]:
         try:
             completed = self._runner(
                 cmd,
@@ -340,10 +340,20 @@ class QmdKnowledgeBackend:
         return ""
 
     @classmethod
-    def _qmd_environment(cls) -> Dict[str, str]:
+    def _qmd_environment(cls) -> dict[str, str]:
         """Map the active profile's persistent QMD path to QMD's XDG contract."""
+        from hermes_constants import (
+            get_default_hermes_root, get_hermes_home, get_routing_process_hermes_home, hermes_home_key,
+        )
+
         env = os.environ.copy()
         configured_data_dir = cls._configured_data_dir()
+        if not configured_data_dir:
+            home = get_hermes_home()
+            if (hermes_home_key(home) != hermes_home_key(get_routing_process_hermes_home())
+                    or hermes_home_key(home) != hermes_home_key(get_default_hermes_root(home=home))):
+                # Process-wide QMD/XDG overrides belong to the launch profile.
+                configured_data_dir = os.fspath(home / "qmd")
         data_dir = configured_data_dir or env.get("QMD_DATA_DIR", "").strip()
         if not data_dir:
             return env

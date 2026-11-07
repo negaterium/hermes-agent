@@ -214,11 +214,6 @@ _EXTRA_ENV_KEYS = frozenset({
     "MATRIX_PASSWORD", "MATRIX_ENCRYPTION", "MATRIX_DEVICE_ID", "MATRIX_HOME_ROOM",
     "MATRIX_REQUIRE_MENTION", "MATRIX_FREE_RESPONSE_ROOMS", "MATRIX_AUTO_THREAD", "MATRIX_DM_AUTO_THREAD",
     "MATRIX_RECOVERY_KEY",
-    # Langfuse observability plugin tuning keys + standard SDK vars (activation is via
-    # plugins.enabled; credentials gate the plugin at runtime).
-    "HERMES_LANGFUSE_ENV", "HERMES_LANGFUSE_RELEASE", "HERMES_LANGFUSE_SAMPLE_RATE",
-    "HERMES_LANGFUSE_MAX_CHARS", "HERMES_LANGFUSE_CAPTURE", "HERMES_LANGFUSE_DEBUG",
-    "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL",
     # ACP (Agent Client Protocol) keys — profile-isolable so profiles can use different backends.
     "HERMES_ACP_AUTH_METHOD", "HERMES_ACP_AUTO_APPROVE", "HERMES_COPILOT_ACP_COMMAND",
     "HERMES_COPILOT_ACP_ARGS", "COPILOT_CLI_PATH", "COPILOT_ACP_BASE_URL"})
@@ -1897,7 +1892,24 @@ def _raw_config_cache_hit(path_key: str, cache_key: tuple[Any, ...]) -> Optional
     return None
 
 
+def _worker_config_snapshot() -> Optional[dict[str, Any]]:
+    """A safe worker's frozen config, or None. Install-time loads run from ``hermes_cli`` alone
+    (the installer's completion step ships no ``agent`` package), and without ``agent`` there
+    is no worker policy to consult."""
+    try:
+        from agent.safe_worker_policy import worker_config_snapshot
+    except ModuleNotFoundError as exc:
+        if exc.name != "agent":
+            raise
+        return None
+    return worker_config_snapshot()
+
+
 def _read_raw_config_impl(*, want_deepcopy: bool) -> dict[str, Any]:
+    snapshot = _worker_config_snapshot()
+    if snapshot is not None:
+        return snapshot
+
     # Lock-free fast path for cache hits — same shape as `_load_config_impl`. `_RAW_CONFIG_CACHE`
     # publishes each entry as ONE `(*sig, data)` tuple replaced wholesale, so a reader sees either
     # the complete old entry or the complete new one; `_CONFIG_LOCK` only serializes the re-parse
@@ -1977,6 +1989,10 @@ def require_readable_config_before_write(config_path: Optional[Path] = None) -> 
     non-mapping root — bare-``except`` loaders treat both as ``{}``, so a subsequent write would
     replace the recoverable file with only the caller's partial dict. Fails closed."""
     if config_path is None:
+        snapshot = _worker_config_snapshot()
+        if snapshot is not None:
+            # A bypass worker's config IS its frozen snapshot; it never reads the profile file.
+            return copy.deepcopy(snapshot)
         config_path = get_config_path()
     try:
         config_path.stat()
@@ -2315,6 +2331,10 @@ def _load_config_cache_hit(path_key: str, cache_sig: Any) -> Optional[dict[str, 
 
 
 def _load_config_impl(*, want_deepcopy: bool) -> dict[str, Any]:
+    snapshot = _worker_config_snapshot()
+    if snapshot is not None:
+        return _deep_merge(copy.deepcopy(DEFAULT_CONFIG), snapshot)
+
     # Lock-free fast path for cache hits — same publication contract as `_read_raw_config_impl`
     # above (whole-tuple replace, `_CONFIG_LOCK` only serializes rebuilds and writers). A hit costs
     # ~0.024ms; behind a lock held by `save_config()` the same read measured 10010ms, and on a
@@ -2485,8 +2505,8 @@ def save_config(
         # swallows transient stat/open errors into ``{}``, and a ``{}`` at this point makes the
         # strip pass drop every user section whose value matches a default (#113301).
         _raw_for_paths = require_readable_config_before_write(config_path)
-        if merge_existing and _raw_for_paths:
-            config = _merge_partial_save(_raw_for_paths, config)
+        from hermes_cli.config_worker_save import rebase_for_save  # frozen-worker writes + merge_existing
+        config = rebase_for_save(config, _raw_for_paths, merge_existing)
 
         current_normalized = _canonicalize_config(config)
         normalized = current_normalized
@@ -2512,6 +2532,10 @@ def load_env() -> dict[str, str]:
     """Load ~/.hermes/.env as a dict. Memoised inside ``load_env_file`` (``get_env_value()`` runs
     hundreds of times per interactive menu render). Each assignment's value is opaque data for
     boundary discovery."""
+    # A frozen-policy worker never opens the profile's files; its secrets arrive
+    # through the owner-installed scope, so the .env layer is empty here.
+    if _worker_config_snapshot() is not None:
+        return {}
     from agent.secret_scope import load_env_file  # the one .env tokenizer; also installs profile scopes
 
     return load_env_file(get_env_path())
@@ -2974,206 +2998,6 @@ def redact_config_value(value: Any, _depth: int = 0) -> Any:
     return value
 
 
-def _section(title: str) -> None:
-    print()
-    print(color(f"◆ {title}", Colors.CYAN, Colors.BOLD))
-
-
-def _show_managed_banner() -> None:
-    """Surface administrator-pinned settings so the user knows why a config.yaml value may not
-    be the effective one."""
-    managed_keys = managed_scope.managed_config_keys()
-    managed_env = managed_scope.load_managed_env()
-    if not managed_keys and not managed_env:
-        return
-    print()
-    print(color(
-        f"  ⚷ Some settings are managed by your administrator ({managed_scope.get_managed_dir()}) "
-        f"and cannot be changed", Colors.YELLOW, Colors.BOLD))
-    for label, keys in (("config", managed_keys), ("env", managed_env)):
-        if keys:
-            print(color(f"    Managed {label} keys: {', '.join(sorted(keys))}", Colors.YELLOW))
-
-
-_SHOW_CONFIG_API_KEYS = (
-    ("OPENROUTER_API_KEY", "OpenRouter"),
-    ("VOICE_TOOLS_OPENAI_KEY", "OpenAI (STT/TTS)"),
-    ("EXA_API_KEY", "Exa"),
-    ("PARALLEL_API_KEY", "Parallel"),
-    ("FIRECRAWL_API_KEY", "Firecrawl"),
-    ("TAVILY_API_KEY", "Tavily"),
-    ("PERPLEXITY_API_KEY", "Perplexity"),
-    ("BROWSERBASE_API_KEY", "Browserbase"),
-    ("BROWSER_USE_API_KEY", "Browser Use"),
-    ("FAL_KEY", "FAL"))
-
-
-def _show_model_section(config: dict[str, Any]) -> None:
-    _section("Model")
-    print(f"  Model:        {redact_config_value(config.get('model', 'not set'))}")
-    cfg_max_turns = config.get('agent', {}).get('max_turns', DEFAULT_CONFIG['agent']['max_turns'])
-    print(f"  Max turns:    {cfg_max_turns}")
-    # Read the .env FILE directly so a stale HERMES_MAX_ITERATIONS ghost is caught even when the
-    # gateway bridge already overrode os.environ.
-    try:
-        env_ghost = load_env().get("HERMES_MAX_ITERATIONS")
-    except Exception:
-        env_ghost = None
-    if env_ghost is not None and str(env_ghost).strip() != str(cfg_max_turns).strip():
-        print(color(f"                ⚠ .env has stale HERMES_MAX_ITERATIONS={env_ghost} "
-                    f"(run 'hermes doctor --fix' to remove)", Colors.YELLOW))
-
-
-def _show_display_section(config: dict[str, Any]) -> None:
-    _section("Display")
-    display = config.get('display', {})
-    try:
-        from hermes_cli.personality import active_personality_name
-        active_personality = active_personality_name(config) or 'none'
-    except Exception:
-        active_personality = display.get('personality') or 'none'
-    on_off = lambda flag: 'on' if flag else 'off'
-    print(f"  Personality:  {active_personality}")
-    print(f"  Reasoning:    {on_off(display.get('show_reasoning', True))}")
-    print(
-        f"  Bell:         complete={on_off(display.get('bell_on_complete', False))}, "
-        f"prompt={on_off(display.get('bell_on_prompt', False))}")
-    ump = display.get('user_message_preview', {})
-    ump = ump if isinstance(ump, dict) else {}
-    print(f"  User preview: first {ump.get('first_lines', 2)} line(s), last {ump.get('last_lines', 2)} line(s)")
-
-
-def _show_terminal_section(config: dict[str, Any]) -> None:
-    _section("Terminal")
-    terminal = config.get('terminal', {})
-    print(f"  Backend:      {terminal.get('backend', 'local')}")
-    print(f"  Working dir:  {terminal.get('cwd', '.')}")
-    print(f"  Timeout:      {terminal.get('timeout', 60)}s")
-
-    configured = lambda *names: 'configured' if all(get_env_value(n) for n in names) else '(not set)'
-    from hermes_cli.config_defaults import DEFAULT_SANDBOX_IMAGE as default_img, DEFAULT_VERCEL_IMAGE as _DEFAULT_VERCEL_IMAGE
-    backend_lines = {
-        'docker': lambda: [f"  Docker image: {terminal.get('docker_image', default_img)}"],
-        'singularity': lambda: [f"  Image:        {terminal.get('singularity_image', 'docker://' + default_img)}"],
-        'modal': lambda: [
-            f"  Modal image:  {terminal.get('modal_image', default_img)}",
-            f"  Modal token:  {configured('MODAL_TOKEN_ID')}"],
-        'daytona': lambda: [
-            f"  Daytona image: {terminal.get('daytona_image', default_img)}",
-            f"  API key:      {configured('DAYTONA_API_KEY')}"],
-        'vercel_sandbox': lambda: [
-            f"  Vercel image:   {terminal.get('vercel_runtime') or terminal.get('vercel_image') or _DEFAULT_VERCEL_IMAGE}",
-            f"  Vercel auth:    {'configured' if get_env_value('VERCEL_OIDC_TOKEN') or (get_env_value('VERCEL_TOKEN') and get_env_value('VERCEL_PROJECT_ID') and get_env_value('VERCEL_TEAM_ID')) else '(not set)'}",
-        ],
-        'ssh': lambda: [
-            f"  SSH host:     {get_env_value('TERMINAL_SSH_HOST') or '(not set)'}",
-            f"  SSH user:     {get_env_value('TERMINAL_SSH_USER') or '(not set)'}"]}
-    for line in backend_lines.get(terminal.get('backend'), list)():
-        print(line)
-
-
-def _show_compression_section(config: dict[str, Any]) -> None:
-    _section("Context Compression")
-    compression = config.get('compression', {})
-    enabled = compression.get('enabled', True)
-    print(f"  Enabled:      {'yes' if enabled else 'no'}")
-    if not enabled:
-        return
-    print(f"  Threshold:    {compression.get('threshold', 0.50) * 100:.0f}%")
-    tt = compression.get('threshold_tokens')
-    try:
-        if tt is not None and int(tt) > 0:
-            print(f"  Token cap:    {int(tt):,} tokens (takes lower of ratio vs absolute)")
-    except (TypeError, ValueError):
-        pass
-    print(f"  Target ratio: {compression.get('target_ratio', 0.20) * 100:.0f}% of threshold preserved")
-    print(f"  Protect last: {compression.get('protect_last_n', 20)} messages")
-    print(f"  Protect first: {compression.get('protect_first_n', 3)} non-system head messages")
-    aux_comp = config.get('auxiliary', {}).get('compression', {})
-    print(f"  Model:        {aux_comp.get('model', '') or '(auto)'}")
-    comp_provider = aux_comp.get('provider', 'auto')
-    if comp_provider and comp_provider != 'auto':
-        print(f"  Provider:     {comp_provider}")
-
-
-def _show_aux_overrides(config: dict[str, Any]) -> None:
-    aux_tasks = {"Vision": config.get('auxiliary', {}).get('vision', {})}
-    overrides = {
-        label: (t.get('provider', 'auto'), t.get('model', ''))
-        for label, t in aux_tasks.items()
-        if t.get('provider', 'auto') != 'auto' or t.get('model', '')}
-    if not overrides:
-        return
-    _section("Auxiliary Models (overrides)")
-    for label, (prov, mdl) in overrides.items():
-        parts = [f"provider={prov}"] + ([f"model={mdl}"] if mdl else [])
-        print(f"  {label:12s}  {', '.join(parts)}")
-
-
-def _show_skill_settings() -> None:
-    try:
-        from agent.skill_utils import discover_all_skill_config_vars, resolve_skill_config_values
-        skill_vars = discover_all_skill_config_vars()
-        if not skill_vars:
-            return
-        resolved = resolve_skill_config_values(skill_vars)
-        _section("Skill Settings")
-        for var in skill_vars:
-            value = resolved.get(var["key"], "")
-            display_val = str(value) if value else color("(not set)", Colors.DIM)
-            skill_tag = color(f"[{var.get('skill', '')}]", Colors.DIM)
-            print(f"  {var['key']:<20s} {display_val}  {skill_tag}")
-    except Exception:
-        pass
-
-
-def show_config():
-    """Display current configuration."""
-    config = load_config()
-
-    print()
-    print(color("┌─────────────────────────────────────────────────────────┐", Colors.CYAN))
-    print(color("│              ☤ Hermes Configuration                    │", Colors.CYAN))
-    print(color("└─────────────────────────────────────────────────────────┘", Colors.CYAN))
-    _show_managed_banner()
-
-    _section("Paths")
-    print(f"  Config:       {get_config_path()}")
-    print(f"  Secrets:      {get_env_path()}")
-    print(f"  Install:      {get_project_root()}")
-
-    _section("API Keys")
-    for env_key, name in _SHOW_CONFIG_API_KEYS:
-        print(f"  {name:<14} {redact_key(get_env_value(env_key))}")
-    from hermes_cli.auth import get_anthropic_key
-    print(f"  {'Anthropic':<14} {redact_key(get_anthropic_key())}")
-
-    _show_model_section(config)
-    _show_display_section(config)
-    _show_terminal_section(config)
-
-    _section("Timezone")
-    tz = config.get('timezone', '')
-    print(f"  Timezone:     {tz or color('(server-local)', Colors.DIM)}")
-
-    _show_compression_section(config)
-    _show_aux_overrides(config)
-
-    _section("Messaging Platforms")
-    for label, env_key in (("Telegram", "TELEGRAM_BOT_TOKEN"), ("Discord", "DISCORD_BOT_TOKEN")):
-        state = 'configured' if get_env_value(env_key) else color('not configured', Colors.DIM)
-        print(f"  {label + ':':<13} {state}")
-
-    _show_skill_settings()
-
-    print()
-    print(color("─" * 60, Colors.DIM))
-    print(color("  hermes config edit     # Edit config file", Colors.DIM))
-    print(color("  hermes config set <key> <value>", Colors.DIM))
-    print(color("  hermes setup           # Run setup wizard", Colors.DIM))
-    print()
-
-
 def edit_config():
     """Open config file in user's editor."""
     if is_managed():
@@ -3196,7 +3020,7 @@ def edit_config():
         return
 
     print(f"Opening {config_path} in {editor}...")
-    subprocess.run([editor, str(config_path)])
+    subprocess.run([editor, str(config_path)], check=False)
 
 
 # ---- Cron model-drift helpers: which unpinned jobs stay on their creation snapshot ----
@@ -3211,7 +3035,7 @@ def _cron_model_drift_axis_for_config_key(key: str) -> Optional[str]:
     return _CRON_DRIFT_AXIS_BY_KEY.get(str(key or "").strip().lower())
 
 
-def _cron_section(config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _cron_section(config: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     """Return the ``cron`` mapping of *config* (loading the merged config when None), else None."""
     if config is None:
         try:
@@ -3222,7 +3046,7 @@ def _cron_section(config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return cron_config if isinstance(cron_config, dict) else None
 
 
-def cron_model_drift_guard_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
+def cron_model_drift_guard_enabled(config: Optional[dict[str, Any]] = None) -> bool:
     """Whether cron must fail closed on unpinned inference drift.
     Only the literal YAML boolean ``false`` disables this spend-safety guard; missing, malformed,
     or non-boolean values stay fail-closed. With *config* omitted the merged config is loaded so
@@ -3243,7 +3067,7 @@ def _model_assignment_text(value: Any) -> str:
 
 
 def resolve_cron_model_drift_defaults(
-    config: Any, *, environ: Optional[Dict[str, str]] = None) -> Tuple[str, str]:
+    config: Any, *, environ: Optional[dict[str, str]] = None) -> tuple[str, str]:
     """Resolve the global ``(provider, model)`` cron compares against snapshots.
     Mirrors the scheduler's precedence: a truthy configured model wins over ``HERMES_MODEL``; the
     environment is only a fallback. Per-job and cron fleet defaults are handled by the caller
@@ -3260,7 +3084,7 @@ def resolve_cron_model_drift_defaults(
 
 def cron_model_drift_axes(
     job: Any, *, current_provider: Any = "", current_model: Any = "", config: Any = None
-) -> List[str]:
+) -> list[str]:
     """Return the unpinned axes that the fail-closed cron guard would block."""
     if not isinstance(job, dict) or not cron_model_drift_guard_enabled(config):
         return []
@@ -3271,7 +3095,7 @@ def cron_model_drift_axes(
     # A cron.model / cron.model_provider fleet default covers its axis: that axis never reads the
     # snapshot at fire time, so reporting it would be false.
     fleet = _cron_section(config) or {}
-    drifted: List[str] = []
+    drifted: list[str] = []
     for axis, fleet_key in (("provider", "model_provider"), ("model", "model")):
         if _model_assignment_text(fleet.get(fleet_key)) or _model_assignment_text(job.get(axis)):
             continue
@@ -3301,7 +3125,7 @@ def _cron_impact_job_name(value: Any, job_id: str) -> str:
     return f"Job {job_id}"[:_CRON_MODEL_IMPACT_NAME_LIMIT].rstrip()
 
 
-def _cron_model_impact_result(available: bool, guard_enabled: bool) -> Dict[str, Any]:
+def _cron_model_impact_result(available: bool, guard_enabled: bool) -> dict[str, Any]:
     return {
         "available": available,
         "guard_enabled": guard_enabled,
@@ -3312,7 +3136,7 @@ def _cron_model_impact_result(available: bool, guard_enabled: bool) -> Dict[str,
 
 def build_cron_model_impact(
     *, current_provider: Any = "", current_model: Any = "", config: Any = None, jobs: Any = None
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Build a bounded, profile-local summary of jobs blocked by model drift.
     Job-store inspection is best effort: the model assignment has already succeeded when Desktop
     requests this, so an unreadable store is reported as unavailable rather than failing.
@@ -3334,7 +3158,7 @@ def build_cron_model_impact(
 
     from cron.jobs import is_job_runnable
 
-    seen_ids: Set[str] = set()
+    seen_ids: set[str] = set()
     for job in jobs:
         if not isinstance(job, dict) or not is_job_runnable(job) or job.get("no_agent"):
             continue
@@ -3358,7 +3182,7 @@ def build_cron_model_impact(
 
 
 def warn_unpinned_cron_jobs_after_model_config_change(
-    key: str, value: Any, config: Optional[Dict[str, Any]] = None) -> None:
+    key: str, value: Any, config: Optional[dict[str, Any]] = None) -> None:
     """Warn when a global model/provider change will trip cron's drift guard."""
     axis = _cron_model_drift_axis_for_config_key(key)
     if axis is None:
@@ -4166,9 +3990,14 @@ def _cmd_config_check(args):
     print()
 
 
+def _cmd_config_show() -> None:
+    from hermes_cli.config_show import show_config
+    show_config()
+
+
 _CONFIG_SUBCOMMANDS = {
-    None: lambda args: show_config(),
-    "show": lambda args: show_config(),
+    None: lambda args: _cmd_config_show(),
+    "show": lambda args: _cmd_config_show(),
     "edit": lambda args: edit_config(),
     "get": _cmd_config_get,
     "set": _cmd_config_set,
@@ -4302,7 +4131,12 @@ def _platform_plugin_manifests(home: Optional[Path] = None, source: PlatformMani
     flat ``plugins/*`` manifest proves it is one only by its content, so an unreadable one is
     skipped with a warning, as is an unsearchable plugin directory. A manifest that does not
     parse declares nothing (its adapter cannot load either) and is skipped. Every skip is appended
-    to ``skipped``, so a caller can tell a complete scan from a partial one."""
+    to ``skipped``, so a caller can tell a complete scan from a partial one. A safe worker reads
+    no plugin manifest at all."""
+    from agent.safe_worker_policy import safe_worker_enabled
+
+    if safe_worker_enabled():
+        return
     for dir_name, manifest_path, require_kind, st in _platform_manifest_paths(home, source):
         if manifest_path is None:
             logger.warning("Skipping unreadable plugin directory %s: %s", dir_name, st)

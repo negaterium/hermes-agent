@@ -3,9 +3,11 @@ and hand back its composed environment."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import threading
 from contextlib import ExitStack, contextmanager, nullcontext
@@ -790,7 +792,9 @@ def _commit_selection(package, facts: Facts, change, *, enabled: list[str], stam
 
 def sync_venv(extras: Optional[list[str]] = None, *, explicit: bool = False,
               plugins: PluginInput | None = None, repair: bool = False,
-              evict_incompatible_plugins: bool = False) -> None:
+              evict_incompatible_plugins: bool = False,
+              expected_facts_sha256: str | None = None,
+              return_facts_sha256: bool = False) -> str | None:
     """Make the venv match uv.lock + the enabled extras. Extras union into
     the installed state (one ledger); no-op when the stamp already matches.
     ``repair`` restores the recorded dependency graph into a fresh generation,
@@ -819,7 +823,14 @@ def sync_venv(extras: Optional[list[str]] = None, *, explicit: bool = False,
 
     token = receipt.begin("sync")
     outcome = "failed"
+    committed_facts_sha256 = None
     try:
+        if (expected_facts_sha256 is not None
+                and (not isinstance(expected_facts_sha256, str)
+                     or not re.fullmatch(r"[a-f0-9]{64}", expected_facts_sha256))):
+            raise ValueError("expected_facts_sha256 must be a lowercase SHA-256 digest")
+        if not isinstance(return_facts_sha256, bool):
+            raise TypeError("return_facts_sha256 must be a bool")
         if repair and (extras is not None or plugins is not None):
             raise ValueError("repair restores the recorded environment; it cannot change features or plugins")
         if evict_incompatible_plugins and (repair or plugins is not None or not explicit):
@@ -830,6 +841,18 @@ def sync_venv(extras: Optional[list[str]] = None, *, explicit: bool = False,
         from pm.publication import StagedPlugin
         with _venv_install_lock(patient=explicit or repair):
             recover_publication(paths.repo_root())
+            facts_path = paths.runtime_facts_path()
+            if expected_facts_sha256 is not None:
+                try:
+                    current_facts = facts_path.read_bytes()
+                except FileNotFoundError:
+                    current_facts = b""
+                actual_facts_sha256 = hashlib.sha256(current_facts).hexdigest()
+                if actual_facts_sha256 != expected_facts_sha256:
+                    raise InstallError(
+                        "venv", "selection changed since recovery preflight",
+                        "read the current native PM facts and retry the operation",
+                    )
             change = _publication(plugins)
             if isinstance(change, StagedPlugin) and not change.active:
                 _publish_inactive(change)
@@ -851,7 +874,10 @@ def sync_venv(extras: Optional[list[str]] = None, *, explicit: bool = False,
                 receipt.record_feature_list(enabled)
                 _commit_selection(package, facts, change, enabled=enabled, stamp=stamp, inputs=inputs,
                                   current=current, repair=repair, explicit=explicit)
+            if return_facts_sha256:
+                committed_facts_sha256 = hashlib.sha256(facts_path.read_bytes()).hexdigest()
         outcome = "ok"
+        return committed_facts_sha256
     except BaseException as exc:
         receipt.record_step("dependency-sync", False, f"{type(exc).__name__}: {exc}")
         raise

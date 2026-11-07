@@ -179,7 +179,7 @@ class WeComMediaMixin:
         return decrypted[:-pad_len]
 
     async def _download_remote_bytes(self, url: str, max_bytes: int) -> tuple[bytes, dict[str, str]]:
-        from gateway.platforms.base import _ssrf_redirect_guard
+        from gateway.platforms.base import ssrf_redirect_guard as _ssrf_redirect_guard
         from tools.url_safety import create_ssrf_safe_async_client, is_safe_url
         from plugins.platforms.wecom import adapter as _adapter_mod
         if not is_safe_url(url):

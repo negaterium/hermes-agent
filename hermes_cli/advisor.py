@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -52,12 +52,16 @@ def _parse_now(value: str | None) -> tuple[datetime | None, str | None]:
     if value is None:
         return None, None
     try:
-        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        text = value.strip()
+        # Native ISO parsing also accepts Z as a separator; the old parser rejected it.
+        if "Z" in text[:-1]:
+            raise ValueError("embedded UTC designator")
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None, "--now must be a valid ISO-8601 timestamp"
     if parsed.tzinfo is None:
         return None, "--now must include a timezone"
-    return parsed.astimezone(timezone.utc), None
+    return parsed.astimezone(UTC), None
 
 
 def _print_json(value: Any, *, pretty: bool) -> None:
