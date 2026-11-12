@@ -95,7 +95,7 @@ def broken_selection(tmp_path, monkeypatch, request):
 
 
 def test_operator_adapter_refuses_stale_facts_before_native_sync(broken_selection):
-    operator, core, _old, facts_path, original, _fact, _lock, _verify, _calls = broken_selection
+    operator, core, _old, facts_path, original, _fact, _lock, _verify, calls = broken_selection
     competing = json.loads(original)
     competing["packages"]["venv"]["stamp"] = "concurrent-selection"
     competing_bytes = json.dumps(competing, separators=(",", ":")).encode()
@@ -470,6 +470,15 @@ def test_copy_only_native_a0_b_a1_rehearsal_preserves_image_python_and_audio_ext
     operator, core, old, facts_path, original, _fact, _lock, _verify, _calls = broken_selection
     from pm.environments import selected_venv
 
+    sync_checks = []
+    native_sync_checked = operator._sync_venv_checked
+
+    def record_checked_sync(root, *, expected_facts_sha256, **options):
+        sync_checks.append((expected_facts_sha256, options))
+        return native_sync_checked(root, expected_facts_sha256=expected_facts_sha256, **options)
+
+    monkeypatch.setattr(operator, "_sync_venv_checked", record_checked_sync)
+
     image_store = core / "tools"
     image_python = stage_host_python(image_store / "python-3.14.9" / "bin" / "python3")
     uv = shutil.which("uv")
@@ -518,10 +527,16 @@ def test_copy_only_native_a0_b_a1_rehearsal_preserves_image_python_and_audio_ext
 
     migrated = operator._migrate(core)
     assert migrated["facts_sha256"] == hashlib.sha256(facts_path.read_bytes()).hexdigest()
-    assert _calls[0][1]["expected_facts_sha256"] == hashlib.sha256(original).hexdigest()
-    assert _calls[0][1]["return_facts_sha256"] is True
-    assert _calls[1][1]["expected_facts_sha256"] == hashlib.sha256(a1_facts).hexdigest()
-    assert _calls[1][1]["return_facts_sha256"] is True
+    assert sync_checks[0] == (hashlib.sha256(original).hexdigest(), {"repair": True, "explicit": True})
+    assert sync_checks[1][0] == hashlib.sha256(a1_facts).hexdigest()
+    assert sync_checks[1][1]["extras"] == ["all", "telegram", "matrix", "audio-io", "edge-tts"]
+    assert sync_checks[1][1]["explicit"] is True
+    assert sync_checks[1][1]["plugins"].dirs == [member]
+    assert _calls[:2] == [
+        ((), {"repair": True, "explicit": True}),
+        ((), {"extras": ["all", "telegram", "matrix", "audio-io", "edge-tts"],
+              "explicit": True, "plugins": sync_checks[1][1]["plugins"]}),
+    ]
 
     backup = operator._backup_root(home) / migrated["backup_id"]
     b_facts_bytes = facts_path.read_bytes()
@@ -594,6 +609,15 @@ def test_missing_interpreter_structural_plan_then_native_repair(broken_selection
 
     operator, core, old, facts_path, original, fact, lock, verify, calls = broken_selection
     generation = operator._tree_fingerprint(old.parent)
+    sync_checks = []
+    native_sync_checked = operator._sync_venv_checked
+
+    def record_checked_sync(root, *, expected_facts_sha256, **options):
+        sync_checks.append((expected_facts_sha256, options))
+        return native_sync_checked(root, expected_facts_sha256=expected_facts_sha256, **options)
+
+    monkeypatch.setattr(operator, "_sync_venv_checked", record_checked_sync)
+
     def no_inventory(*args, **kwargs):
         pytest.fail("broken A0 must not pretend to have a runnable inventory")
     monkeypatch.setattr(operator, "_inventory", no_inventory)
@@ -608,11 +632,8 @@ def test_missing_interpreter_structural_plan_then_native_repair(broken_selection
     with pytest.raises(RuntimeError):
         operator._migrate(core)
     report = operator._repair(core)
-    assert calls == [((), {
-        "repair": True, "explicit": True,
-        "expected_facts_sha256": hashlib.sha256(original).hexdigest(),
-        "return_facts_sha256": True,
-    })]
+    assert calls == [((), {"repair": True, "explicit": True})]
+    assert sync_checks == [(hashlib.sha256(original).hexdigest(), {"repair": True, "explicit": True})]
     new = selected_venv(core)
     assert new != old
     verify(new / "bin/python")

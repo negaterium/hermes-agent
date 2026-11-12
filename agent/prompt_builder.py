@@ -797,6 +797,14 @@ def hud_surface_note(valid_tool_names: set[str] | None = None,
 # swapped at the API boundary in _build_api_kwargs().
 DEVELOPER_ROLE_MODELS = ("gpt-5", "codex")
 
+_LOCAL_CRON_DELIVERY_NOTE = (
+    "Cron jobs scheduled from this session are LOCAL-ONLY: their output is saved (viewable via cronjob "
+    "action='list') but is NOT delivered back into this session — there is no live-delivery channel here. If "
+    "the user wants to be notified when a job runs, the job's `deliver` must target a gateway-connected "
+    "messaging platform (e.g. deliver='telegram' or 'all'). Do not promise that a deliver='origin' or "
+    "default-deliver cron job will message them in this session."
+)
+
 # Hints for core surfaces only. A messaging platform's hint ships with its plugin
 # (``PlatformEntry.platform_hint``, read by agent/system_prompt._default_platform_hint).
 PLATFORM_HINTS = {
@@ -811,15 +819,15 @@ PLATFORM_HINTS = {
         "You are in a plain terminal (CLI). Markdown does NOT render — asterisks, headers, and fences appear as "
         "literal characters, so write plain text (indentation and blank lines are your only layout tools). Files: "
         "there is no attachment channel and MEDIA:/path tags are NOT intercepted here (they print as literal text) — "
-        # The cron local-only delivery caveat lives in cronjob_manage's deliver description (deferred: paid
-        # only when the tool is loaded), not in every CLI/TUI prompt.
-        "deliver a file by stating its absolute path or URL in plain text; the user opens it themselves."
+        "deliver a file by stating its absolute path or URL in plain text; the user opens it themselves. "
+        f"{_LOCAL_CRON_DELIVERY_NOTE}"
     ),
     "tui": (
         # Same file-delivery reality as the CLI: no MEDIA: interception in tui/.
         "You are in the Hermes terminal UI (TUI). Files: there is no attachment channel and MEDIA:/path tags "
         "are NOT intercepted here (they print as literal text) — deliver a file by stating its absolute path "
-        "or URL in plain text."
+        "or URL in plain text. "
+        f"{_LOCAL_CRON_DELIVERY_NOTE}"
     ),
     "desktop": (
         # Every claim verified against the shipping renderer (inline-preview-directive.tsx). Widget text is
