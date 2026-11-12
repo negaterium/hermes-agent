@@ -145,6 +145,9 @@ def test_startup_recovery_never_asks_a_dependency_question(tmp_path, monkeypatch
     monkeypatch.setattr("sys.stdout", _Tty())
     monkeypatch.setattr(mig, "_attempted", set())
     monkeypatch.setattr(mig, "catalog_source", lambda n: n)
+    # The DarkServer fork retains the bundled Hindsight implementation; this test exercises the
+    # catalog-recovery path for a home where that provider is absent.
+    monkeypatch.setattr(mig, "provider_present", lambda name, home: False)
     monkeypatch.setattr(pm_install, "lazy_installs_allowed", lambda: True)
     monkeypatch.setattr("builtins.input", lambda *_a: pytest.fail("agent init asked a question"))
     seen: list[dict] = []
@@ -302,6 +305,9 @@ def test_startup_recovery_backs_off_after_a_failed_install(tmp_path, monkeypatch
     (tmp_path / "config.yaml").write_text("memory:\n  provider: hindsight\n", encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setattr(mig, "catalog_source", lambda n: n)
+    # The DarkServer fork retains the bundled Hindsight implementation; this test exercises the
+    # catalog-recovery path for a home where that provider is absent.
+    monkeypatch.setattr(mig, "provider_present", lambda name, home: False)
     monkeypatch.setattr(pm_install, "lazy_installs_allowed", lambda: True)
     attempts: list[str] = []
     monkeypatch.setattr(mig, "_install_into", lambda home, **_kw: (lambda n: attempts.append(n) or {"ok": False, "error": "uv lock exited 1"}))

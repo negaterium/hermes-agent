@@ -1,0 +1,117 @@
+# Exact locally present Ubuntu 24.04 image; no mutable base pull.
+FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+
+# node-pty@1.1.0 has no Linux/Node 26 prebuild in every registry mirror;
+# keep the node-gyp fallback reproducible in the image build.
+RUN apt-get update && apt-get install -y \
+    curl git gh bash ca-certificates gnupg ripgrep ffmpeg tini rclone \
+    build-essential python3 libolm-dev cmake \
+    libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0 \
+    libcairo2 libcups2t64 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 \
+    libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 \
+    libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
+    libvulkan-dev glslang-tools \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_26.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# PostgreSQL client tools are runtime dependencies for the scheduled database
+# snapshot and backup jobs. Install them in the image rather than mutating the
+# live container from a cron job after every rebuild.
+RUN set -eux; \
+    install -d -m 0755 /etc/apt/keyrings; \
+    tmp_dir="$(mktemp -d)"; \
+    trap 'rm -rf "$tmp_dir"' EXIT; \
+    curl -fsSL --retry 3 --retry-all-errors \
+        -o "$tmp_dir/postgresql.asc" \
+        https://www.postgresql.org/media/keys/ACCC4CF8.asc; \
+    gpg --batch --yes --dearmor \
+        --output /etc/apt/keyrings/postgresql.gpg \
+        "$tmp_dir/postgresql.asc"; \
+    printf '%s\n' \
+        'deb [signed-by=/etc/apt/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main' \
+        > /etc/apt/sources.list.d/pgdg.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends postgresql-client-17; \
+    pg_dump --version; \
+    pg_dumpall --version; \
+    rm -rf /var/lib/apt/lists/*
+
+# Python and the private installer are acquired from PM pins after the source copy.
+
+ENV PATH="/root/.cargo/bin:/root/.local/bin:$PATH"
+ENV QMD_DATA_DIR="/root/.hermes/qmd"
+# GitHub CLI credentials must live on the persistent Hermes bind rather than
+# the container layer, so a rebuild does not strand branch promotion auth.
+ENV GH_CONFIG_DIR="/root/.hermes/gh"
+# Keep the PM-pinned browser payload in the immutable image, outside the
+# /root/.hermes volume overlay. darkserver-start.sh discovers the executable
+# at runtime and exports AGENT_BROWSER_EXECUTABLE_PATH for agent-browser.
+ENV PLAYWRIGHT_BROWSERS_PATH="/app/tools"
+
+WORKDIR /app
+COPY . /app
+# Measure the Docker-filtered COPY payload before npm/PM alter /app. This
+# canonical identity includes uncommitted source without relying on host Python.
+RUN python3 -B /app/deployment/darkserver/context_identity.py /app /opt/hermes/build-context.sha256
+
+# Route HTTPS GitHub authentication through gh. Its token lookup honors
+# GH_CONFIG_DIR above, while the binary/helper itself remains image-managed.
+RUN git config --system credential.https://github.com.helper '!/usr/bin/gh auth git-credential'
+
+# Install the locked Node workspaces. Chromium is not installed by npm:
+# upstream PM owns the checksummed browser artifact and records its runtime
+# facts below. Keeping those authorities separate avoids a Playwright revision
+# drift between package-lock.json and the browser used by Hermes.
+RUN npm ci --workspaces=false --no-audit --fetch-retries=5 \
+    && npm_config_ignore_scripts=true node /app/scripts/build/node-deps.mjs --source /app \
+       --workspace web --workspace ui-tui --workspace ui-tui/packages/hermes-ink --workspace apps/shared \
+    && npm cache clean --force
+
+# Explicit helper avoids classic-builder heredoc loss; reviewed version only.
+RUN npm install -g @tobilu/qmd@2.8.3 \
+    && node /app/deployment/darkserver/patch-qmd.cjs
+
+# Build a fresh single dependency union through native PM, not raw pip/uv.
+ARG HERMES_BUILD_COMMIT=""
+ARG HERMES_CONTEXT_SHA256=""
+ENV HERMES_RUNTIME_DIR=/app/tools CC=gcc CXX=g++
+RUN touch /app/README.md \
+    && python3 -c 'import pm; pm.ensure("uv", explicit=True)' \
+    && HERMES_BUILD_COMMIT="$HERMES_BUILD_COMMIT" HERMES_CONTEXT_SHA256="$HERMES_CONTEXT_SHA256" \
+       python3 -c 'import runpy; runpy.run_path("/app/deployment/darkserver/build.py", run_name="__main__")'
+ENV PYTHONDONTWRITEBYTECODE=1 HERMES_DISABLE_LAZY_INSTALLS=1 PYTHONPATH=/app
+ENV PATH="/app/venv/bin:/app/tools/npm-12.0.2-linux-x64/bin:/app/tools/node-26.12.1-linux-x64/bin:/app/tools/uv-0.13.5-linux-x64:$PATH"
+
+# Verify the PM-pinned Chromium and preserve its architecture-specific path
+# for hermes_cli.browser_runtime. The browser is installed by build.py into
+# /app/tools and is never downloaded through npm at build time.
+RUN set -eux; \
+    browser_bin="$(/app/venv/bin/python3 -c 'from pm import installed_package; print(installed_package("chromium").binary)')"; \
+    test -n "$browser_bin"; \
+    test -x "$browser_bin"; \
+    "$browser_bin" --version; \
+    mkdir -p /etc/hermes; \
+    printf '%s' "$browser_bin" > /etc/hermes/chromium-executable-path
+
+# This deployment serves the dashboard and its embedded TUI from immutable products.
+ENV HERMES_WEB_DIST=/opt/hermes/products/web HERMES_TUI_DIR=/opt/hermes/products/tui
+RUN HERMES_PYTHON=/app/venv/bin/python3 NODE_OPTIONS=--max-old-space-size=4096 RAYON_NUM_THREADS=4 \
+    node /app/deployment/darkserver/build-frontends.mjs --source /app --products /opt/hermes/products
+
+RUN mkdir -p /root/.local/bin \
+    && ln -sf /app/venv/bin/hermes /root/.local/bin/hermes \
+    && install -m 0755 /app/scripts/darkserver-start.sh /root/.local/bin/darkserver-start.sh \
+    && if [ -f /app/scripts/obsidian-sync.sh ]; then install -m 0755 /app/scripts/obsidian-sync.sh /root/.local/bin/obsidian-sync.sh; fi
+
+RUN mkdir -p /root/.hermes/{cron,sessions,logs,memories,skills,pairing,hooks,image_cache,audio_cache,whatsapp/session,qmd} \
+    && cp /app/cli-config.yaml.example /root/.hermes/config.yaml
+
+VOLUME ["/root/.hermes"]
+EXPOSE 6666
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["darkserver-start.sh"]

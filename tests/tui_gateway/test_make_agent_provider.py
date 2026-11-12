@@ -6,9 +6,47 @@ provider/base_url/api_key empty in AIAgent, causing HTTP 404.
 """
 
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
+
+
+def test_make_agent_passes_profile_disabled_toolsets():
+    """TUI agents must enforce the profile's global toolset suppression list."""
+
+    fake_runtime = {
+        "provider": "anthropic",
+        "base_url": "https://api.anthropic.com",
+        "api_key": "sk-test-key",
+        "api_mode": "anthropic_messages",
+        "command": None,
+        "args": None,
+        "credential_pool": None,
+    }
+    fake_cfg = {
+        "model": {"default": "claude-opus-4-6", "provider": "anthropic"},
+        "agent": {"system_prompt": "test", "disabled_toolsets": ["project", "terminal"]},
+    }
+
+    with (
+        patch("tui_gateway.server._load_cfg", return_value=fake_cfg),
+        patch("tui_gateway.server._get_db", return_value=MagicMock()),
+        patch("tui_gateway.server._load_tool_progress_mode", return_value="compact"),
+        patch("tui_gateway.server._load_reasoning_config", return_value=None),
+        patch("tui_gateway.server._load_service_tier", return_value=None),
+        patch("tui_gateway.server._load_enabled_toolsets", return_value=["project", "memory"]),
+        patch(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            return_value=fake_runtime,
+        ),
+        patch("run_agent.AIAgent") as mock_agent,
+    ):
+        from tui_gateway.server import _make_agent
+
+        _make_agent("sid-disabled", "key-disabled")
+
+    assert mock_agent.call_args.kwargs["enabled_toolsets"] == ["project", "memory"]
+    assert mock_agent.call_args.kwargs["disabled_toolsets"] == ["project", "terminal"]
 
 
 def test_probe_config_health_flags_null_sections():

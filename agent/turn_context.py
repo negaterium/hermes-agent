@@ -1305,7 +1305,16 @@ def build_turn_context(
     # first adopts any `hermes sessions refresh-prompts` request recorded since it set its prompt.
     refresh_warm_prompt(agent, system_message, conversation_history)
     if agent._cached_system_prompt is None:
-        restore_or_build_system_prompt(agent, system_message, conversation_history)
+        restore_or_build_system_prompt(
+            agent,
+            system_message,
+            conversation_history,
+            skill_query=(
+                original_user_message
+                if isinstance(original_user_message, str)
+                else None
+            ),
+        )
     active_system_prompt = agent._cached_system_prompt
     # `/delegation <backend> --now`: after the pin restore, so a fresh agent rebuilds too.
     from agent.delegation_backends import apply_requested_tool_rebuild

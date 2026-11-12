@@ -136,15 +136,28 @@ import hermes_constants
 hermes_constants._scratch_pruned_once = True
 
 _HERMES_EXPORTED_TMP = os.environ.get(SCRATCH_DIR_MARKER_ENV, "")
+_HERMES_TMPDIR_REMOVED = False
 if _HERMES_EXPORTED_TMP:
     for _key in SCRATCH_TMP_ENV_VARS:
         if os.environ.get(_key, "").strip() == _HERMES_EXPORTED_TMP:
+            if _key == "TMPDIR":
+                _HERMES_TMPDIR_REMOVED = True
             del os.environ[_key]
     del os.environ[SCRATCH_DIR_MARKER_ENV]
 
 from hermes_state_guard import _real_platform_state_root
 
 _real_test_root = _real_platform_state_root() or (Path.home() / ".hermes").resolve()
+from tests.runner_scratch import owned_runner_temp_root
+
+_runner_ownership_env = os.environ
+if _HERMES_TMPDIR_REMOVED and os.environ.get("HERMES_TEST_SCRATCH_ROOT"):
+    # A recognized Hermes export was discarded, not an arbitrary user mismatch.
+    # Validate the independent runner/debug-root binding before restoring any temp path.
+    _runner_ownership_env = dict(os.environ, TMPDIR=os.environ.get("PYTEST_DEBUG_TEMPROOT", ""))
+_RUNNER_TEMP_ROOT = owned_runner_temp_root(_runner_ownership_env, _real_test_root)
+if _HERMES_TMPDIR_REMOVED and _RUNNER_TEMP_ROOT is not None:
+    os.environ["TMPDIR"] = str(_RUNNER_TEMP_ROOT)
 _guarded_tmp_roots = [_real_test_root]
 _custom_test_home = os.environ.get("HERMES_HOME")
 if _custom_test_home:
@@ -153,7 +166,8 @@ for _key in SCRATCH_TMP_ENV_VARS:
     _value = os.environ.get(_key)
     if _value:
         _path = Path(_value).expanduser().resolve()
-        if any(_path.is_relative_to(_root) for _root in _guarded_tmp_roots):
+        owned_temp = _RUNNER_TEMP_ROOT is not None and _path.is_relative_to(_RUNNER_TEMP_ROOT)
+        if not owned_temp and any(_path.is_relative_to(_root) for _root in _guarded_tmp_roots):
             del os.environ[_key]
 tempfile.tempdir = None  # re-resolve after stripping guarded temp directories
 os.environ.setdefault("TMPDIR", tempfile.gettempdir())
@@ -703,6 +717,8 @@ def _kanban_write_guard(_hermetic_environment, monkeypatch):
                 .expanduser()
                 .resolve()
             )
+        if _RUNNER_TEMP_ROOT is not None and resolved.is_relative_to(_RUNNER_TEMP_ROOT):
+            return _orig_connect(db_path, *args, **kwargs)
         try:
             resolved.relative_to(_REAL_KANBAN_ROOT)
         except ValueError:
@@ -1078,6 +1094,9 @@ def _relocate_basetemp_outside_operator_home(config) -> None:
     candidate = given if given is not None else Path(
         os.environ.get("PYTEST_DEBUG_TEMPROOT") or tempfile.gettempdir()
     )
+    if (native == _real_test_root and _RUNNER_TEMP_ROOT is not None
+            and candidate.resolve().is_relative_to(_RUNNER_TEMP_ROOT)):
+        return
     if not candidate.resolve().is_relative_to(native):
         return
     # The system temp dir may itself be inside the home (Windows TEMP under the
@@ -1677,7 +1696,10 @@ def _forbid_real_hermes_home_io(monkeypatch, request):
         return
     from tests.home_io_guard import HomeIOGuard
 
-    HomeIOGuard(lambda: _REAL_HERMES_ROOT_CANDIDATES, lambda: _REAL_INSTALLED_GUI_APPS).install(monkeypatch)
+    HomeIOGuard(
+        lambda: _REAL_HERMES_ROOT_CANDIDATES, lambda: _REAL_INSTALLED_GUI_APPS,
+        runner_temp_root=_RUNNER_TEMP_ROOT, runner_native_root=_real_test_root,
+    ).install(monkeypatch)
 
 
 @pytest.fixture

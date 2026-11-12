@@ -140,3 +140,27 @@ def test_whatsapp_pairing_watcher_keeps_streamed_error(monkeypatch, lines, retur
     _rt_messaging._watch_whatsapp_pairing("watch", proc)
     assert record.status == "error"
     assert expected in record.error
+def test_start_whatsapp_onboarding_ignores_empty_creds_file(monkeypatch, tmp_path):
+    from hermes_cli import web_server as ws
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    (session_dir / "creds.json").write_bytes(b"")
+
+    ws._whatsapp_onboarding_sessions.clear()
+    monkeypatch.setattr(ws, "_whatsapp_session_path", lambda: session_dir)
+    monkeypatch.setattr(ws.secrets, "token_urlsafe", lambda size: "empty-creds")
+    monkeypatch.setattr(ws, "_run_whatsapp_pairing", lambda *args: None)
+
+    result = asyncio.run(
+        ws.start_whatsapp_onboarding(
+            ws.WhatsAppOnboardingStart(mode="bot", allowed_users="15551234567")
+        )
+    )
+
+    assert result["pairing_id"] == "empty-creds"
+    assert result["status"] != "connected"
+    assert result["qr_payload"] is None
+    assert not (session_dir / "creds.json").exists()
+    assert ws._whatsapp_onboarding_sessions["empty-creds"].status != "connected"
+    ws._whatsapp_onboarding_sessions.clear()

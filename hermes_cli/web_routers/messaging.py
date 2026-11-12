@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -52,7 +53,7 @@ _profile_scope = late("_profile_scope", "hermes_cli.web_server_profiles")
 _resolve_profile_dir = late("_resolve_profile_dir", "hermes_cli.web_server_profiles")
 _restart_gateway_after_whatsapp_onboarding = late("_restart_gateway_after_whatsapp_onboarding", "hermes_cli.web_server_messaging")
 _telegram_onboarding_request_sync = late("_telegram_onboarding_request_sync", "hermes_cli.web_server_messaging")
-_whatsapp_session_path = late("_whatsapp_session_path", "hermes_cli.web_server_messaging")
+_whatsapp_session_path = late("_whatsapp_session_path")
 _write_platform_enabled = late("_write_platform_enabled", "hermes_cli.web_server_messaging")
 load_env = late("load_env", "hermes_cli.config")
 get_secret_source_values = late("get_secret_source_values", "hermes_cli.env_loader")
@@ -628,6 +629,13 @@ def _expire_whatsapp_pairing(record: _WhatsAppOnboardingSession) -> None:
         _release_whatsapp_reservation(record)
 
 
+def _run_whatsapp_pairing_compat(*args: Any) -> None:
+    """Honor the pre-split web_server monkeypatch seam when present."""
+    facade = sys.modules.get("hermes_cli.web_server")
+    override = getattr(facade, "__dict__", {}).get("_run_whatsapp_pairing") if facade else None
+    (override or _run_whatsapp_pairing)(*args)
+
+
 def _prune_whatsapp_onboarding_sessions() -> None:
     now = time.time()
     remove_ids: list[str] = []
@@ -714,10 +722,23 @@ async def start_whatsapp_onboarding(body: WhatsAppOnboardingStart, profile: Opti
             expires_at=datetime.fromtimestamp(expires_at_ts, UTC).isoformat().replace("+00:00", "Z"),
             expires_at_ts=expires_at_ts, profile=target_profile,
         )
-        already_linked = not body.reset_session and (session_path / "creds.json").exists()
-        if already_linked:  # creds on disk: report connected without pairing
+        creds_path = session_path / "creds.json"
+        already_linked = not body.reset_session and creds_path.is_file()
+        if already_linked:  # usable creds on disk: report connected without pairing
             account_id, account_name, account_phone = _whatsapp_linked_account_from_session(session_path)
-            fields.update(status="connected", account_id=account_id, account_name=account_name, account_phone=account_phone)
+            if account_id:
+                fields.update(status="connected", account_id=account_id, account_name=account_name, account_phone=account_phone)
+            else:
+                # Baileys may leave an empty or partial creds.json after a bridge
+                # timeout. It is not evidence of a linked account, and leaving it
+                # in place can make the next auth-state load fail before a QR is
+                # emitted. Remove only this unusable marker; pairing regenerates
+                # the auth state in the same session directory.
+                try:
+                    creds_path.unlink()
+                except OSError as exc:
+                    _log.warning("Could not remove unusable WhatsApp credentials: %s", exc)
+                already_linked = False
 
         record = _WhatsAppOnboardingSession(**fields)
         if already_linked:

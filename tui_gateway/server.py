@@ -1261,8 +1261,6 @@ _BOOL_WORDS = {
 }
 
 
-
-
 def _restart_slash_worker(sid: str, session: dict):
     # Respawn on the agent's current route (model, provider, base_url) after a switch or compression.
     worker, agent = session.get("slash_worker"), session.get("agent")
@@ -1604,8 +1602,6 @@ class _RuntimeFallbackResolution(NamedTuple):
     runtime: dict
     selected_model: str | None
     used_fallback: bool
-
-
 
 
 def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | None) -> None:

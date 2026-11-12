@@ -84,6 +84,10 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
         mark_kwargs["expected_fire_owner"] = fire_owner
     if d.blocked_config:
         mark_kwargs["status"] = "blocked_config"
+    elif d.blocked_run:
+        mark_kwargs["status"] = "blocked"
+    elif d.partial_run:
+        mark_kwargs["status"] = "partial"
     # A run that removed its own record has nothing left to mark; the delivery above is its result.
     marked = scheduler.self_removal_delivery_allowed(job["id"]) or scheduler.mark_job_run(
         job["id"], d.success, d.error, **mark_kwargs)

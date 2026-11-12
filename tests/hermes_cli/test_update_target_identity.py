@@ -56,6 +56,12 @@ def update_tree(tmp_path, monkeypatch):
     newer = git(origin, 'rev-parse', 'HEAD')
 
     monkeypatch.setattr(cli_main, 'PROJECT_ROOT', clone)
+    # The fixture's clone is the checkout under test; avoid re-exec into the
+    # interpreter's owning installation.
+    monkeypatch.setattr(
+        "hermes_cli.update_owning_install.retarget_to_owning_install",
+        lambda _root: None,
+    )
     monkeypatch.setattr(update_receipt, '_code_identity', lambda **_: {'commit': base})
     monkeypatch.setattr(cli_main, '_run_pre_update_backup', lambda *_: 'release-snapshot')
     monkeypatch.setattr(cli_main, '_pause_windows_gateways_for_update', lambda: None)

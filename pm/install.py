@@ -665,16 +665,34 @@ def _runtime_state_matches(fact: dict, stamp: str, *, project_root: Path | None 
     return (environment / "pyvenv.cfg").is_file()
 
 
-def _member_inputs(plugins: PluginInput | None) -> dict:
+def _deployment_member_candidates(project_root: Path) -> Candidates | None:
+    """Include the Docker-owned integration member in implicit PM selections."""
+    root = Path(project_root).resolve()
+    try:
+        stamp = json.loads(paths.install_stamp_path(root).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(stamp, dict) or stamp.get("distribution") != "docker":
+        return None
+    member = root / "deployment" / "darkserver" / "integration-member"
+    if not (member / "pyproject.toml").is_file():
+        return None
+    return Candidates([member])
+
+
+def _member_inputs(plugins: PluginInput | None, *, project_root: Path | None = None) -> dict:
     """The ``plugin_dirs`` argument of the venv package; empty means config discovery."""
     from pm.publication import candidate_members
 
+    if plugins is None:
+        root = Path(project_root) if project_root is not None else paths.repo_root()
+        plugins = _deployment_member_candidates(root)
+        if plugins is None:
+            return {}
     if isinstance(plugins, Candidates):
         return {"plugin_dirs": candidate_members(plugins.dirs)}
     if isinstance(plugins, Members):
         return {"plugin_dirs": plugins.dirs}
-    if plugins is None:
-        return {}
     raise TypeError(f"{type(plugins).__name__} changes plugin state; only a sync may carry it")
 
 
@@ -730,7 +748,7 @@ def venv_is_current(*, extras: list[str] | None = None, plugins: Members | Candi
             or any(not isinstance(extra, str) for extra in fact["extras"])):
         raise ValueError("invalid recorded dependency state")
     enabled = sorted(set(_carried(package, fact["extras"])) | set(extras or []))
-    stamp = package.expected_stamp(enabled, **_member_inputs(plugins))
+    stamp = package.expected_stamp(enabled, **_member_inputs(plugins, project_root=root))
     return _runtime_state_matches(fact, stamp, project_root=root)
 
 
@@ -917,7 +935,8 @@ def _sync_locked(extras, *, package, plugins, repair: bool, explicit: bool, ship
         fact = facts.get("venv") or _facts().get("venv") or {}
         sync_evicting(package, facts, fact, extras=extras, shipped=shipped, frozen=frozen, explicit=explicit)
     else:
-        inputs = {"plugin_dirs": change.members} if change is not None else _member_inputs(plugins)
+        inputs = ({"plugin_dirs": change.members} if change is not None
+                  else _member_inputs(plugins, project_root=package.project_root()))
         facts = Facts(paths.runtime_facts_path(), strict=repair)
         fact = facts.get("venv") or _facts().get("venv") or {}
         enabled, stamp, inputs = _target_selection(package, fact, extras=extras, inputs=inputs,

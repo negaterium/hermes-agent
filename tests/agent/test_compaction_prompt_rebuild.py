@@ -77,6 +77,8 @@ def _init_repo(path, first_commit):
     ):
         subprocess.run(cmd, cwd=path, check=True)
     (path / "main.py").write_text("print(1)\n")
+    # Identify this owned code workspace before discovery reaches protected ancestors.
+    (path / "pyproject.toml").write_text("[project]\nname = 'fixture'\nversion = '0'\n")
     subprocess.run(["git", "add", "-A"], cwd=path, check=True)
     subprocess.run(["git", "commit", "-qm", first_commit], cwd=path, check=True)
     return path
