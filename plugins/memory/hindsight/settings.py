@@ -59,7 +59,7 @@ def _daemon_llm_provider(provider: str) -> str:
     return "openai" if provider in _OPENAI_WIRE_PROVIDERS else provider
 
 
-def _normalize_retain_tags(value: Any) -> List[str]:
+def _normalize_retain_tags(value: Any) -> list[str]:
     """Normalize tag config/tool values to a deduplicated list of strings."""
     if value is None:
         return []
@@ -79,7 +79,7 @@ def _normalize_retain_tags(value: Any) -> List[str]:
     return normalized
 
 
-def _normalize_recall_tags(value: Any) -> List[str]:
+def _normalize_recall_tags(value: Any) -> list[str]:
     """Normalize recall tag config while preserving iterable tag items."""
     if value is None:
         return []

@@ -4,7 +4,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import json
 from pathlib import Path
-import re
 import subprocess
 import sys
 import threading
@@ -18,10 +17,19 @@ from pm.worker_operations import OPERATIONS
 
 
 def _missing_or_refuse(name):
-    from pm.install import _refuse_lazy, is_installed, lazy_installs_allowed
-    from pm.registry import walk
+    from pm.install import _refuse_lazy, current_target, is_installed, lazy_installs_allowed
+    from pm.registry import get_package, walk
 
     missing = [package.name for package in walk([name]) if not is_installed(package.name)]
+    target = current_target() if missing else None
+    for gap in missing:
+        # A registry gap (git on POSIX: "uses system git by choice") is static: no worker can
+        # install it, so answer with the worker's own refusal here. Asking one anyway cost a PM
+        # worker round trip (about a second) on every ``selected_git_env()``, which each
+        # checkpoint git child calls, so one gateway /rollback or /diff paid it several times.
+        reason = get_package(gap).missing_reason(target)
+        if reason is not None:
+            raise InstallError(gap, f"unavailable on {target}: {reason}", "none")
     if missing and not lazy_installs_allowed():
         raise _refuse_lazy(name, ", ".join(missing))
     return missing
@@ -208,16 +216,9 @@ def ensure(name, *, base_env=None, explicit=False, verify=True, progress=None, p
 
 def sync_venv(extras=None, *, explicit=False, plugins: PluginInput | None = None, repair=False,
               project_root: Path | None = None, evict_incompatible_plugins: bool = False,
-              expected_facts_sha256: str | None = None,
-              return_facts_sha256: bool = False) -> str | None:
+              automatic: list[str] | None = None, carried: list[str] | None = None) -> None:
     from pm.environments import running_from_selected_environment
 
-    if (expected_facts_sha256 is not None
-            and (not isinstance(expected_facts_sha256, str)
-                 or not re.fullmatch(r"[a-f0-9]{64}", expected_facts_sha256))):
-        raise ValueError("expected_facts_sha256 must be a lowercase SHA-256 digest")
-    if not isinstance(return_facts_sha256, bool):
-        raise TypeError("return_facts_sha256 must be a bool")
     if extras and not explicit and not repair and not running_from_selected_environment(
             paths.repo_root() if project_root is None else Path(project_root)):
         # A lazy extra may only extend the environment this process runs from. From any other
@@ -233,19 +234,17 @@ def sync_venv(extras=None, *, explicit=False, plugins: PluginInput | None = None
     if isinstance(plugins, Selection) and "expected_config" not in plugins.data:
         from pm.filesystem import file_digest
         plugins = Selection({**plugins.data,
-                             "expected_config": file_digest(Path(plugins.data["home"]) / "config.yaml") or "missing"})
+                             "expected_config": file_digest(Path(plugins.data["home"]) / "config.yaml") or "missing"})  # config-reader: ok — pm publication: byte-level compare-and-swap rewrite of the local file
     foreign = project_root is not None and Path(project_root).resolve() != paths.repo_root().resolve()
     if is_runtime() and not foreign:
         from pm.install import sync_venv as direct
         return direct(extras, explicit=explicit, plugins=plugins, repair=repair,
-                      evict_incompatible_plugins=evict_incompatible_plugins,
-                      expected_facts_sha256=expected_facts_sha256,
-                      return_facts_sha256=return_facts_sha256)
-    return _request("sync_venv", {"extras": extras, "explicit": explicit, "repair": repair,
-                                  "plugins": plugin_inputs.encode(plugins),
-                                  "evict_incompatible_plugins": evict_incompatible_plugins,
-                                  "expected_facts_sha256": expected_facts_sha256,
-                                  "return_facts_sha256": return_facts_sha256}, project_root=project_root)
+                      evict_incompatible_plugins=evict_incompatible_plugins, automatic=automatic, carried=carried)
+    _request("sync_venv", {"extras": extras, "explicit": explicit, "repair": repair,
+                          "plugins": plugin_inputs.encode(plugins),
+                          "evict_incompatible_plugins": evict_incompatible_plugins, "automatic": automatic,
+                          "carried": carried},
+             project_root=project_root)
 
 
 def ensure_tools_for_sync() -> None:

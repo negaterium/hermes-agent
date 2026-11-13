@@ -24,12 +24,13 @@ from agent.model_metadata import CHARS_PER_TOKEN
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.skill_utils import (
     EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS,
-    TIER_LOCAL, extract_skill_conditions, extract_skill_description, get_disabled_skill_names, get_skill_search_roots,
+    TIER_LOCAL, clip_skill_description, extract_skill_conditions, extract_skill_description,
+    get_disabled_skill_names, get_skill_search_roots,
     iter_skill_index_files, parse_frontmatter, skill_matches_apps, skill_matches_environment,
     skill_matches_platform, skill_matches_platform_list,
 )
 from tools.threat_patterns import scan_for_threats as _scan_for_threats
-from utils import atomic_json_write, file_signature
+from utils import atomic_json_write, file_cache_version
 
 logger = logging.getLogger(__name__)
 
@@ -171,9 +172,11 @@ DEFAULT_AGENT_IDENTITY = (
 HERMES_AGENT_HELP_GUIDANCE = (
     # Injected only when skill_view exists AND the hermes-agent skill is installed (system_prompt.py slot
     # resolution). No "when the two differ" clause: docs-are-authoritative already carries the precedence.
-    "You run on Hermes Agent (by Nous Research). When the user needs help with Hermes itself — configuring, "
-    "setting up, using, extending, or troubleshooting it — or when you need to understand your own features, "
-    "tools, or capabilities, the documentation at https://hermes-agent.nousresearch.com/docs is your "
+    # Names Hermes Agent without restating identity: SOUL.md line 1 already says who you are, while a custom
+    # persona (no Hermes identity line) still learns from "Hermes Agent itself" + "your own features" what it runs on.
+    "For help with Hermes Agent itself — configuring, setting up, using, extending, or troubleshooting it — "
+    "or to understand your own features, tools, or capabilities, the documentation at "
+    "https://hermes-agent.nousresearch.com/docs is your "
     "authoritative reference and always holds the latest, most up-to-date information. The `hermes-agent` "
     "skill has the actual commands and proven workflows — load it with skill_view(name='hermes-agent') "
     "before configuring, modifying, or troubleshooting Hermes so you don't guess or invent workarounds."
@@ -181,9 +184,9 @@ HERMES_AGENT_HELP_GUIDANCE = (
 
 # Variant for sessions without the skills toolset (e.g. Blank Slate): naming skill_view() there would dangle.
 HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS = (
-    "You run on Hermes Agent (by Nous Research). When the user needs help with Hermes itself — configuring, "
-    "setting up, using, extending, or troubleshooting it — or when you need to understand your own features, "
-    "tools, or capabilities, the documentation at https://hermes-agent.nousresearch.com/docs is the "
+    "For help with Hermes Agent itself — configuring, setting up, using, extending, or troubleshooting it — "
+    "or to understand your own features, tools, or capabilities, the documentation at "
+    "https://hermes-agent.nousresearch.com/docs is the "
     "authoritative reference and always holds the latest, most up-to-date information. Point the user there "
     "(or read it yourself if you have a way to fetch web content)."
 )
@@ -246,7 +249,7 @@ SESSION_SEARCH_GUIDANCE = (
 # The opening sentence is worded deliberately: Anthropic's server-side filter rejected the previous phrasing
 # ("After completing a complex task (5+ tool calls)... save the approach as a skill...") on subscription OAuth
 # credentials, surfacing as a billing-shaped HTTP 400. If you rewrite it, re-verify with a subscription OAuth
-# token — sk-ant-api keys do not hit the filter. The safety-rule heading is referenced by tests and compaction summaries.
+# token — sk-ant-api keys do not hit the filter.
 # Anthropic's server-side content filter rejects the previous phrasing ("After completing a complex task (5+
 # tool calls), fixing a tricky error, or discovering a non-trivial workflow, save the approach as a skill
 # with skill_manage so you can reuse it next time.") on subscription OAuth credentials, and surfaces that
@@ -256,16 +259,10 @@ SESSION_SEARCH_GUIDANCE = (
 # not understood — if you rewrite this sentence, re-verify against a subscription OAuth token, not an
 # sk-ant-api… key, which does not hit the filter. Dieted (#95681, maintainer-directed): the record-it /
 # patch-it coaching that used to open this block duplicated the ## Skills section (which teaches both "offer
-# to save as a skill" and "fix it with skill_manage(action='patch')") and skill_manage's own schema. Only
-# the compaction-pruning contract lives here — nothing else teaches it.
-SKILL_SAFETY_HEADING = "## Skill Safety Rule"
-SKILLS_GUIDANCE = (
-    "When you work out a non-trivial workflow, record it with skill_manage for future reuse.\n\n"
-    f"{SKILL_SAFETY_HEADING}\n"
-    "A skill placeholder containing `[SKILL_PRUNED]` lost its content in context compression and is inaccessible — "
-    "reload it with skill_view(name='...') before acting on anything that depends on it. After reloading, ignore any "
-    "remaining `[SKILL_PRUNED]` markers for that same skill; they are historical artifacts of earlier compactions."
-)
+# to save as a skill" and "fix it with skill_manage(action='patch')") and skill_manage's own schema. The
+# [SKILL_PRUNED] reload rule that followed moved to the compaction summary, the only place markers exist
+# (agent/context_compressor_tail.py::with_skill_safety_rule): fresh sessions no longer pay for it.
+SKILLS_GUIDANCE = "When you work out a non-trivial workflow, record it with skill_manage for future reuse."
 
 KANBAN_GUIDANCE = (
     "# Kanban task execution protocol\n"
@@ -835,7 +832,7 @@ PLATFORM_HINTS = {
     "desktop": (
         # Every claim verified against the shipping renderer (inline-preview-directive.tsx). Widget text is
         # recipe-first: HOW (an inline widget IS a ::preview'd HTML file) and WHY (the frame injects the theme
-        # prelude first; width adopts the first measured span). setup_mcp is taught by its own tool schema.
+        # prelude first; the frame spans the column up to its cap). setup_mcp is taught by its own tool schema.
         "You are chatting inside the Hermes desktop app, a graphical chat surface. Markdown renders with full GitHub "
         "flavor (tables, syntax-highlighted code, math via $...$, task lists, callouts). Deliver files by writing "
         "MEDIA:/absolute/path/to/file — any file type: images/audio/video render inline, everything else becomes a "
@@ -845,11 +842,12 @@ PLATFORM_HINTS = {
         "frame already themes it — the app's live theme arrives as var(--foreground), var(--muted-foreground), "
         "var(--accent), var(--border), var(--card), plus the app font, zero margins, and a transparent background, "
         "injected before your styles — so use those vars for color and don't set your own background, font, or margins "
-        "(only a standalone PAGE — mockup, poster, game — overrides them). The frame sizes itself to your content: "
-        "height live, width from the content's first measured span — lay content flush left with no centering wrappers "
-        "or it measures full-bleed. Widgets talk back: data-hermes-send=\"prompt\" on any clickable element (or "
-        "window.hermes.send(\"prompt\")) sends that prompt as a hidden user turn — answer it by updating the widget's "
-        "file, not with prose."
+        "(only a standalone PAGE — mockup, poster, game — overrides them). The frame spans the chat column up to 960px "
+        "and follows it on resize, and its height follows your content live up to 1200px: lay content out fluidly and "
+        "flush left, with no centering wrappers, and size charts from the frame's current width, redrawing on resize. "
+        "Widgets talk back: data-hermes-send=\"prompt\" on any clickable "
+        "element (or window.hermes.send(\"prompt\")) sends that prompt as a hidden user turn — answer it by updating "
+        "the widget's file, not with prose."
     ),
     "api_server": (
         "You're responding through an API server. The rendering layer is unknown — assume plain text. No markdown "
@@ -915,6 +913,7 @@ def build_platform_hint(
 # described a renderer that does not exist anywhere in web/. If a real WebUI chat surface ships, write a
 # hint from its actual renderer — do not resurrect this text.
 TELEGRAM_RICH_MESSAGES_HINT = (
+    "Rich messages are on for this chat, so the bullets/no-tables advice above does not apply. "
     "Telegram now supports rich Markdown, so lean into it: whenever it makes the answer clearer or easier to scan, "
     "actively reach for real Markdown tables (pipe `| col | col |` syntax), bullet and numbered lists, task lists (`- "
     "[ ]` / `- [x]`), headings, nested blockquotes, collapsible details, footnotes/references, math/formulas (`$...$`, "
@@ -937,12 +936,11 @@ WSL_ENVIRONMENT_HINT = (
 
 # Backends that run commands (and every file tool) in a separate container / remote host: host OS/$HOME/cwd
 # would mislead, so the agent only sees the machine it can touch.
-_REMOTE_TERMINAL_BACKENDS = frozenset({"docker", "singularity", "modal", "daytona", "ssh", "vercel_sandbox", "managed_modal"})
+_REMOTE_TERMINAL_BACKENDS = frozenset({"docker", "modal", "daytona", "ssh", "vercel_sandbox", "managed_modal"})
 
 # Used when the live probe fails: only what the backend choice implies — never an invented cwd/user/$HOME.
 _BACKEND_FALLBACK_DESCRIPTIONS: dict[str, str] = {
     "docker": "a Docker container (Linux)",
-    "singularity": "a Singularity container (Linux)",
     "modal": "a Modal sandbox (Linux)",
     "managed_modal": "a managed Modal sandbox (Linux)",
     "daytona": "a Daytona workspace (Linux)",
@@ -1016,7 +1014,7 @@ def _tenv_read(name: str, default: str = "") -> str:
     return terminal_env(name, default)
 
 
-_BACKEND_IMAGE_KEYS = {b: f"{b}_image" for b in ("docker", "singularity", "modal", "daytona")}
+_BACKEND_IMAGE_KEYS = {b: f"{b}_image" for b in ("docker", "modal", "daytona")}
 # (config key, default) pairs forwarded to _create_environment's container_config.
 # Single-line POSIX probe; `2>/dev/null` keeps a missing binary from polluting output.
 # OS/kernel only: the sandbox's user, $HOME and cwd are user-identifying and nothing consumes
@@ -1071,8 +1069,13 @@ def _format_backend_probe(output: str) -> str:
 
 
 def _probe_remote_backend(env_type: str) -> str | None:
-    """Describe the active non-local backend via a live probe; None if it failed (cached, failures included)."""
+    """Describe the active non-local backend via a live probe; None if it failed (cached, failures included).
+    None in a hosted scope: the probe builds and tears down a throwaway environment, and a hosted agent's
+    only environment is its own sandbox."""
     from hermes_constants import hermes_home_key
+    from tools.hosted_tool_policy import host_feature_enabled
+    if not host_feature_enabled("backend_probe"):
+        return None
     cache_key = (hermes_home_key(), env_type, _tenv_read("TERMINAL_CWD", ""))
     formatted = _BACKEND_PROBE_CACHE.get(cache_key)
     if formatted is None:
@@ -1271,8 +1274,8 @@ _SKILLS_PROMPT_CACHE_MAX = 32
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
 # v2 added org provenance fields (org_id/org_author); v4 adds ``rel`` (SKILL.md path relative to its root) for
-# duplicate-name resolution. Older snapshots are rebuilt.
-_SKILLS_SNAPSHOT_VERSION = 4
+# duplicate-name resolution; v5 stores clipped descriptions; v6 stores category descriptions. Older snapshots are rebuilt.
+_SKILLS_SNAPSHOT_VERSION = 6
 
 
 _SKILL_QUERY_STOPWORDS = frozenset(
@@ -1314,7 +1317,7 @@ def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
             try:
                 if filename in files:
                     st = os.stat(path)
-                    manifest[path[prefix_len:]] = list(file_signature(st))
+                    manifest[path[prefix_len:]] = list(file_cache_version(path, st, always_digest=True))
             except OSError:
                 pass
     return manifest
@@ -1422,7 +1425,7 @@ def _plugin_skill_prompt_rows(
             if not _skill_should_show(extract_skill_conditions(frontmatter), available_tools,
                                       available_toolsets, session_platform):
                 continue
-            desc = str(meta.get("description") or "").strip() or extract_skill_description(frontmatter)
+            desc = clip_skill_description(str(meta.get("description") or "").strip()) or extract_skill_description(frontmatter)
             rows.append((name, desc))
     except Exception:
         logger.debug("Plugin skill prompt rows unavailable", exc_info=True)
@@ -1554,8 +1557,9 @@ def build_skills_system_prompt(
     ContextVar would otherwise leak the default profile's skills into a bot's prompt.
     """
     from agent.safe_worker_policy import safe_worker_enabled
+    from tools.hosted_tool_policy import host_feature_enabled
 
-    if safe_worker_enabled():
+    if safe_worker_enabled() or not host_feature_enabled("skills"):
         return ""
     _home_token = None
     if skills_dir_override is not None:
@@ -1588,16 +1592,17 @@ def _entry_name(entry: dict) -> str:
 
 
 def _read_category_descriptions(root: Path, log_fmt: str) -> dict[str, str]:
-    """``description`` from every DESCRIPTION.md under *root*, keyed by category path."""
+    """Read category descriptions from DESCRIPTION.md files under a skill root."""
     found: dict[str, str] = {}
     for desc_file in iter_skill_index_files(root, "DESCRIPTION.md"):
         try:
-            cat_desc = parse_frontmatter(desc_file.read_text(encoding="utf-8-sig"))[0].get("description")
-            if cat_desc:
-                rel = desc_file.relative_to(root)
-                found["/".join(rel.parts[:-1]) if len(rel.parts) > 1 else "general"] = str(cat_desc).strip().strip("'\"")
-        except Exception as e:
-            logger.debug(log_fmt, desc_file, e)
+            category_description = parse_frontmatter(desc_file.read_text(encoding="utf-8-sig"))[0].get("description")
+            if category_description:
+                relative = desc_file.relative_to(root)
+                category = "/".join(relative.parts[:-1]) if len(relative.parts) > 1 else "general"
+                found[category] = str(category_description).strip().strip("'\"")
+        except Exception as exc:
+            logger.debug(log_fmt, desc_file, exc)
     return found
 
 
@@ -1625,7 +1630,7 @@ def _label_visible_entries(visible_entries: list[dict], skills_by_category: dict
 
 
 def _render_skills_index(
-    skills_by_category: dict[str, list[tuple[str, str]]], category_descriptions: dict[str, str],
+    skills_by_category: dict[str, list[tuple[str, str]]],
     compact_categories: frozenset[str] | None, available_tools: set[str] | None, unloadable: list[str] = (),
 ) -> str:
     """Render the ## Skills block; "" when there is nothing to list. *unloadable* names (different skills
@@ -1652,13 +1657,15 @@ def _render_skills_index(
         if category in demoted:
             index_lines.append(f"  {category} [names only]: {', '.join(sorted({n for n, _ in entries}))}")
             continue
-        cat_desc = category_descriptions.get(category, "")
-        index_lines.append(f"  {category}: {cat_desc}" if cat_desc else f"  {category}:")
-        seen = set()
+        rows: dict[str, str] = {}
         for name, desc in sorted(entries, key=lambda x: x[0]):  # stable: first entry per name wins
-            if name not in seen:
-                seen.add(name)
-                index_lines.append(f"    - {name}: {desc}" if desc else f"    - {name}")
+            rows.setdefault(name, desc)
+        # A one-skill category is a single top-level row: its header would only repeat what the row
+        # says (a skill at the top of the tree is its own category, so the name printed twice).
+        indent = "  " if len(rows) == 1 else "    "
+        if len(rows) > 1:
+            index_lines.append(f"  {category}:")
+        index_lines.extend(f"{indent}- {name}: {desc}" if desc else f"{indent}- {name}" for name, desc in rows.items())
     from agent.oneshot_footprint import ONESHOT_SKILLS_LOAD_GUIDANCE, is_single_query_session
     if is_single_query_session():
         return (
@@ -1747,7 +1754,10 @@ def _build_skills_system_prompt_inner(
         candidates = [(entry, skill_matches_platform_list(entry.get("platforms") or [])
                        and skill_matches_apps({"requires_apps": entry.get("requires_apps") or []}))
                       for entry in snapshot.get("skills", []) if isinstance(entry, dict)]
-        category_descriptions = {str(k): str(v) for k, v in (snapshot.get("category_descriptions") or {}).items()}
+        category_descriptions = {
+            str(category): str(description)
+            for category, description in (snapshot.get("category_descriptions") or {}).items()
+        }
     else:
         candidates = []
         for skill_file in iter_skill_index_files(skills_dir, "SKILL.md"):
@@ -1764,8 +1774,10 @@ def _build_skills_system_prompt_inner(
     rows += [({**entry, "tier": TIER_LOCAL, "root": skills_dir}, ok) for entry, ok in candidates]
     for tier, root in ((t, d) for t, d in extra_roots if t != TIER_PROJECT and d.exists()):
         rows += _scan_extra_root(root, iter_skill_index_files(root, "SKILL.md"), tier, "Error reading external skill %s: %s")
-        for cat, cat_desc in _read_category_descriptions(root, "Could not read external skill description %s: %s").items():
-            category_descriptions.setdefault(cat, cat_desc)
+        for category, description in _read_category_descriptions(
+            root, "Could not read external skill description %s: %s"
+        ).items():
+            category_descriptions.setdefault(category, description)
     resolved = resolve_skill_catalog([
         {**entry, "name": _entry_name(entry), "path": entry["root"] / entry["rel"],
          "visible": ok and not hides(entry.get("skill_name") or "", entry.get("conditions") or {})}
@@ -1799,11 +1811,14 @@ def _build_skills_system_prompt_inner(
         for name, desc in plugin_rows
     )
     if snapshot is None:  # persist for fast cold-start reuse (best-effort)
-        category_descriptions.update(_read_category_descriptions(skills_dir, "Could not read skill description %s: %s"))
+        category_descriptions.update(
+            _read_category_descriptions(skills_dir, "Could not read skill description %s: %s")
+        )
         try:
             atomic_json_write(_skills_prompt_snapshot_path(), {
                 "version": _SKILLS_SNAPSHOT_VERSION, "manifest": _build_skills_manifest(skills_dir),
-                "skills": [entry for entry, _ in candidates], "category_descriptions": category_descriptions,
+                "skills": [entry for entry, _ in candidates],
+                "category_descriptions": category_descriptions,
             })
         except Exception as e:
             logger.debug("Could not write skills prompt snapshot: %s", e)
@@ -1845,13 +1860,7 @@ def _build_skills_system_prompt_inner(
                 + "\n</available_skills>\n"
             )
     else:
-        result = _render_skills_index(
-            skills_by_category,
-            category_descriptions,
-            compact_categories,
-            available_tools,
-            unloadable,
-        )
+        result = _render_skills_index(skills_by_category, compact_categories, available_tools, unloadable)
     with _SKILLS_PROMPT_CACHE_LOCK:
         _SKILLS_PROMPT_CACHE[cache_key] = result
         _SKILLS_PROMPT_CACHE.move_to_end(cache_key)
@@ -1922,8 +1931,9 @@ def load_soul_md(context_length: Optional[int] = None, home_override: Path | Non
     the skills-index leak fixed in #86313).
     """
     from agent.safe_worker_policy import safe_worker_enabled
+    from tools.hosted_tool_policy import host_feature_enabled
 
-    if safe_worker_enabled():
+    if safe_worker_enabled() or not host_feature_enabled("context_files"):
         return None
     try:
         from hermes_cli.config import ensure_hermes_home
@@ -2129,9 +2139,10 @@ def build_context_files_prompt(
     from HERMES_HOME is independent and always included unless *skip_soul* (already the identity slot).
     """
     from agent.safe_worker_policy import safe_worker_enabled
+    from tools.hosted_tool_policy import host_feature_enabled
 
-    if safe_worker_enabled():
-        return ""
+    if safe_worker_enabled() or not host_feature_enabled("context_files"):
+        return ""  # hosted: the project's files are in the agent's sandbox, this host's are not its
     cwd_path = Path(cwd if cwd is not None else os.getcwd()).resolve()
     if _project_context_suppressed(cwd, cwd_path, allow_install_tree_fallback):
         logger.warning(

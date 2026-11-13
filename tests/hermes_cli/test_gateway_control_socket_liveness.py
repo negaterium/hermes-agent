@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-import gateway.control_socket as control_socket
+from gateway import control_socket
 import gateway.status as gateway_status
-import hermes_cli.gateway as gateway
+from hermes_cli import gateway
 from hermes_constants import get_hermes_home
 
 
@@ -110,7 +110,7 @@ def test_find_gateway_pids_probes_all_profile_homes_across_a_b_a(monkeypatch, tm
 
 def test_find_gateway_pids_continues_after_one_profile_home_lookup_fails(monkeypatch, tmp_path):
     import hermes_cli.gateway_process_discovery as process_discovery
-    import hermes_cli.profiles as profiles
+    from hermes_cli import profiles
 
     homes = {
         "default": tmp_path / "default",

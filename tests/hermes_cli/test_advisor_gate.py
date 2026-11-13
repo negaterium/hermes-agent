@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -20,7 +20,7 @@ from hermes_cli.advisor_gate import (
 )
 
 
-NOW = datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
 STAMP = NOW.isoformat().replace("+00:00", "Z")
 
 

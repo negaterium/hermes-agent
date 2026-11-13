@@ -172,11 +172,11 @@ def test_contract_stays_sticky_through_retry_unblock_review_and_synthetic_run(bo
     cfg = loaded(isolated)
     policy = kb.pin_worker_contract(board, task, worker_profile="worker", worker_config=cfg)
     raw = p.policy_json(policy)
-    claimed = kb.claim_task(board, task, worker_profile="worker", worker_config=cfg)
+    kb.claim_task(board, task, worker_profile="worker", worker_config=cfg)
     board.execute("UPDATE tasks SET claim_expires=1 WHERE id=?", (task,))
     assert kb.release_stale_claims(board, signal_fn=lambda *a: pytest.fail("unexpected signal")) == 1
     assert kb.get_task(board, task).worker_contract == raw
-    claimed = kb.claim_task(board, task, worker_profile="worker", worker_config=cfg)
+    kb.claim_task(board, task, worker_profile="worker", worker_config=cfg)
     assert kb.block_task(board, task, reason="synthetic")
     assert kb.unblock_task(board, task)
     assert kb.get_task(board, task).worker_contract == raw

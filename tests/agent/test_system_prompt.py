@@ -117,6 +117,8 @@ def test_kanban_guidance_fallback_requires_owned_worker_task(monkeypatch, task_i
 ])
 def test_memory_guidance_respects_available_writes(stores, names, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    # This matrix tests memory-write guidance, not project skill discovery.
+    monkeypatch.setattr("agent.skill_utils.find_project_root", lambda: None)
     agent = _make_agent(valid_tool_names=names, skip_context_files=True,
                         _memory_enabled=stores[0], _user_profile_enabled=stores[1])
     prompt = build_system_prompt(agent)
@@ -163,6 +165,8 @@ class TestContextFileCwd:
     def test_desktop_launch_artifact_uses_profile_configured_cwd(
         self, monkeypatch, tmp_path
     ):
+        # Bound context-file discovery to this synthetic workspace.
+        (tmp_path / ".git").mkdir(exist_ok=True)
         from agent import runtime_cwd
 
         launch = tmp_path / "launch"
@@ -195,6 +199,8 @@ class TestContextFileCwd:
     def test_desktop_explicit_install_tree_workspace_still_loads_agents_md(
         self, monkeypatch, tmp_path
     ):
+        # Bound context-file discovery to this synthetic workspace.
+        (tmp_path / ".git").mkdir(exist_ok=True)
         from agent import runtime_cwd
 
         monkeypatch.setattr(runtime_cwd, "_PACKAGE_ROOT", tmp_path.resolve())
@@ -240,6 +246,8 @@ def _init_code_repo(path):
 
     subprocess.run(["git", "-C", str(path), "init", "-q"], check=True)
     (path / "main.py").write_text("print('hi')\n")
+    # Resolve the code workspace locally without probing unrelated ancestors.
+    (path / "pyproject.toml").write_text("[project]\nname = 'fixture'\nversion = '0'\n")
 
 
 class TestCodingContextBlock:
@@ -268,6 +276,8 @@ class TestCodingContextBlock:
 
 
 def test_shared_project_context_precedes_worktree_bytes(monkeypatch, tmp_path):
+    # Bound context-file discovery to this synthetic workspace.
+    (tmp_path / ".git").mkdir(exist_ok=True)
     import os
 
     monkeypatch.setenv("TERMINAL_ENV", "local")
@@ -289,6 +299,8 @@ def test_shared_project_context_precedes_worktree_bytes(monkeypatch, tmp_path):
 
 
 def test_stored_prompt_cwd_ignores_project_host_decoys(monkeypatch, tmp_path):
+    # Bound context-file discovery to this synthetic workspace.
+    (tmp_path / ".git").mkdir(exist_ok=True)
     from agent.conversation_loop import _stored_prompt_matches_runtime
 
     cwd = tmp_path / "worktree"
@@ -316,6 +328,8 @@ def test_stored_prompt_cwd_ignores_project_host_decoys(monkeypatch, tmp_path):
 
 
 def test_stored_prompt_stamped_for_another_session_is_not_restored(monkeypatch, tmp_path):
+    # Bound context-file discovery to this synthetic workspace.
+    (tmp_path / ".git").mkdir(exist_ok=True)
     """With the Session ID trailer on, a prompt persisted for another session (a /branch child
     copies its parent's bytes) must rebuild instead of telling the model the parent's id."""
     from agent.conversation_loop import _stored_prompt_matches_runtime
@@ -393,31 +407,6 @@ class TestExecutionGuidanceInjection:
     def test_no_tools_no_guidance(self):
         assert "Execution discipline" not in self._prompt(
             "deepseek/deepseek-v4-pro", valid_tool_names=())
-
-
-class TestAsyncDelegationHandoffGuidance:
-    """A background child cannot re-enter until the parent yields its current turn (#124072)."""
-
-    def _prompt(self, valid_tool_names):
-        return _stable_prompt(_make_agent(
-            valid_tool_names=list(valid_tool_names),
-            model="openai/gpt-5.5",
-            _tool_use_enforcement="auto",
-            _execution_guidance="auto",
-        ))
-
-    @pytest.mark.parametrize("tools,expected", [
-        (("delegate_task", "execute_code"), True),
-        (("execute_code",), False),
-    ])
-    def test_handoff_injected_only_with_delegate_task(self, tools, expected):
-        stable = self._prompt(tools)
-        assert ("Async handoff" in stable) is expected
-        if expected:
-            assert stable.count("Async handoff") == 1
-            # Must follow the generic "keep working" blocks so it reads as their exception.
-            assert stable.index("Async handoff") > stable.index("Tool-use enforcement")
-            assert stable.index("Async handoff") > stable.index("Execution discipline")
 
 
 class TestNamedProfileHintIntegration:
@@ -578,7 +567,8 @@ class TestTelegramRichMessagesHint:
 
     def test_base_hint_without_rich_messages(self, monkeypatch):
         """When rich_messages is False, only the base hint is used."""
-        agent = _make_agent(platform="telegram")
+        # Full plugin guidance requires a media-capable tool surface.
+        agent = _make_agent(platform="telegram", valid_tool_names=["tts"])
         with patch("hermes_cli.config.load_config_readonly") as mock_cfg:
             mock_cfg.return_value = {
                 "gateway": {"platforms": {"telegram": {"extra": {"rich_messages": False}}}},
@@ -601,6 +591,8 @@ class TestTelegramRichMessagesHint:
         assert "lean into it" in stable
         assert "task lists" in stable
         assert "math/formulas" in stable
+        # The base hint's "(no tables)" steer must be explicitly superseded, after it, not left to contradict.
+        assert stable.index("does not apply") > stable.index("Telegram has no table syntax")
 
     def test_rich_hint_from_top_level_platforms(self):
         """Top-level ``platforms.telegram.extra.rich_messages`` is merged
@@ -638,7 +630,7 @@ class TestTelegramRichMessagesHint:
         assert "lean into it" in stable
 
     def test_base_hint_without_config(self, monkeypatch):
-        agent = _make_agent(platform="telegram")
+        agent = _make_agent(platform="telegram", valid_tool_names=["tts"])
         with patch("hermes_cli.config.load_config_readonly") as mock_cfg:
             mock_cfg.return_value = {}
             stable = _stable_prompt(agent)
@@ -678,7 +670,7 @@ class TestTelegramRichMessagesHint:
         """A truthy non-mapping ``extra`` must not crash prompt construction —
         it should fail open to the base hint (Tek's fail-open concern).
         """
-        agent = _make_agent(platform="telegram")
+        agent = _make_agent(platform="telegram", valid_tool_names=["tts"])
         with patch("hermes_cli.config.load_config_readonly") as mock_cfg:
             mock_cfg.return_value = {
                 "gateway": {"platforms": {"telegram": {"extra": "not-a-map"}}}

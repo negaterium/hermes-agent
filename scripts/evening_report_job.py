@@ -38,6 +38,7 @@ def run(
     try:
         proc = subprocess.run(
             cmd,
+            check=False,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -136,7 +137,7 @@ def main() -> int:
         bb_max = int(today.get("body_battery_max") or 0)
         stress = int(today.get("stress_avg") or 0)
         sleep_h = int(sleep_hours)
-        sleep_m = int(round((sleep_hours - sleep_h) * 60))
+        sleep_m = round((sleep_hours - sleep_h) * 60)
         if sleep_m == 60:
             sleep_h += 1
             sleep_m = 0

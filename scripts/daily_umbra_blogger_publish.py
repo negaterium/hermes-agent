@@ -15,7 +15,7 @@ import os
 import re
 import sys
 import unicodedata
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from html import unescape
 from pathlib import Path
 from uuid import uuid4
@@ -66,9 +66,12 @@ def _local_date(value: str | None) -> str | None:
     if not value:
         return None
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        # Keep rejecting embedded Z separators as the former replacement did.
+        if value.find("Z") not in (-1, len(value) - 1):
+            return None
+        parsed = datetime.fromisoformat(value)
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.replace(tzinfo=UTC)
         return parsed.astimezone(PUBLISH_TZ).date().isoformat()
     except (TypeError, ValueError, OverflowError):
         return None

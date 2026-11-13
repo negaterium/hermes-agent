@@ -206,12 +206,12 @@ class LedgerMemoryProvider(MemoryProvider):
         assistant_content: str,
         *,
         session_id: str = "",
-        messages: List[Dict[str, Any]] | None = None,
+        messages: list[dict[str, Any]] | None = None,
     ) -> None:
         # Raw turns belong to Hermes session history, not the exact ledger.
         return None
 
-    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+    def on_session_end(self, messages: list[dict[str, Any]]) -> None:
         # No automatic extraction or promotion.
         return None
 
@@ -225,7 +225,7 @@ class LedgerMemoryProvider(MemoryProvider):
         # Built-in MEMORY.md/USER.md writes are not silently copied here.
         return None
 
-    def get_tool_schemas(self) -> List[Dict[str, Any]]:
+    def get_tool_schemas(self) -> list[dict[str, Any]]:
         return [
             _RECORD_SCHEMA,
             _CORRECT_SCHEMA,
@@ -236,7 +236,7 @@ class LedgerMemoryProvider(MemoryProvider):
             _DELETE_SCHEMA,
         ]
 
-    def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+    def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs) -> str:
         if not isinstance(args, dict):
             return tool_error("ledger arguments must be an object")
         if self._ledger is None:
@@ -328,7 +328,7 @@ class LedgerMemoryProvider(MemoryProvider):
             logger.exception("Exact memory ledger tool failed: %s", tool_name)
             return tool_error("exact memory ledger operation failed")
 
-    def get_config_schema(self) -> List[Dict[str, Any]]:
+    def get_config_schema(self) -> list[dict[str, Any]]:
         from hermes_constants import display_hermes_home
 
         return [
@@ -344,7 +344,7 @@ class LedgerMemoryProvider(MemoryProvider):
             },
         ]
 
-    def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
+    def save_config(self, values: dict[str, Any], hermes_home: str) -> None:
         try:
             from hermes_cli.config import atomic_config_write, read_user_config_raw
 
@@ -357,7 +357,7 @@ class LedgerMemoryProvider(MemoryProvider):
         except Exception:
             logger.exception("Could not save exact memory ledger configuration")
 
-    def backup_paths(self) -> List[str]:
+    def backup_paths(self) -> list[str]:
         # The default and supported configured path live under HERMES_HOME, so
         # Hermes' normal profile backup already captures the database.
         return []

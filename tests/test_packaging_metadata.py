@@ -264,78 +264,16 @@ def test_pyproject_pins_are_internally_consistent():
     )
 
 
-def test_build_system_requires_exempt_from_exclude_newer():
-    """Regression guard for the #78227 / #75992 exclude-newer brick class.
+def test_lock_release_age_policy_has_no_package_exemptions():
+    """Core locks check release age for exact pins too; installs trust the lock.
 
-    ``[tool.uv].exclude-newer`` applies to ``[build-system].requires`` too.
-    When a resolver cannot see a package's upload date (old uv, mirror
-    index, stale HTTP cache) it treats the release as newer than the cutoff
-    and filters it — and because build requirements are exact-pinned there
-    is no older candidate to fall back to, so the project cannot even be
-    BUILT from a git checkout ("No solution found when resolving:
-    setuptools==83.0.0", observed on released v0.20.0).
-
-    Exempting an exact-pinned build requirement costs nothing: the version
-    cannot move without a reviewed pin bump, so exclude-newer adds no float
-    protection for it. Every build requirement must therefore appear in the
-    ``exclude-newer-package`` whitelist (set to ``false``) for as long as a
-    relative ``exclude-newer`` cutoff is configured.
+    PM workspace behavior is covered by tests/pm/test_workspace.py. Do not
+    restore old per-package exemptions to compensate for install-time checks.
     """
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     uv_cfg = data.get("tool", {}).get("uv", {})
-    if "exclude-newer" not in uv_cfg:
-        pytest.skip("no exclude-newer cutoff configured — nothing to exempt")
-    whitelist = {
-        _canonical(name)
-        for name, enabled in uv_cfg.get("exclude-newer-package", {}).items()
-        if enabled is False
-    }
-    build_requires = {
-        _canonical(_distribution_name(req))
-        for req in data.get("build-system", {}).get("requires", [])
-    }
-    missing = sorted(build_requires - whitelist)
-    assert not missing, (
-        "build-system.requires packages are subject to the exclude-newer "
-        "cutoff but missing from the [tool.uv].exclude-newer-package "
-        f"whitelist — fresh builds brick when upload dates are invisible: {missing}"
-    )
-
-
-def test_exact_pinned_deps_exempt_from_exclude_newer():
-    """Regression guard for the release-day brick class.
-
-    Every release exact-pins at least one dependency to a version published
-    days before the release (v0.20.6: snowballstemmer==3.1.1,
-    psutil==7.2.2). For two weeks after release the relative
-    ``exclude-newer`` cutoff filters those versions out, so any venv that
-    predates the release cannot resolve the new pins at all ("no version of
-    snowballstemmer==3.1.1" — observed 2026-08-29 updating three production
-    installs v0.20.0 -> v0.20.6, one Termux and two Linux servers). The pin
-    bump WAS the review, so the cutoff adds zero float protection for an
-    exact pin and can only brick.
-
-    Every exact-pinned package in [project].dependencies and
-    optional-dependencies must therefore appear in the
-    ``exclude-newer-package`` whitelist (set to ``false``) for as long as a
-    relative ``exclude-newer`` cutoff is configured.
-    """
-    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    uv_cfg = data.get("tool", {}).get("uv", {})
-    if "exclude-newer" not in uv_cfg:
-        pytest.skip("no exclude-newer cutoff configured — nothing to exempt")
-    whitelist = {
-        _canonical(name)
-        for name, enabled in uv_cfg.get("exclude-newer-package", {}).items()
-        if enabled is False
-    }
-    missing = sorted(set(_pins_from_specs(_pyproject_pinned_specs())) - whitelist)
-    assert not missing, (
-        "exact-pinned packages are subject to the exclude-newer cutoff but "
-        "missing from the [tool.uv].exclude-newer-package whitelist — "
-        "release-day updates brick while the pinned version is younger than "
-        f"the cutoff: {missing}"
-    )
+    assert uv_cfg.get("exclude-newer"), "core locks must retain a release-age gate"
+    assert not uv_cfg.get("exclude-newer-package"), "core pins must not bypass release-age checks"
 
 
 
@@ -475,3 +413,48 @@ def test_starlette_server_pins_and_lock_exclude_cve_2026_48710():
     assert len(pins) == 1 and pins[0].operator == "==" and Version(pins[0].version) >= floor
     versions = [Version(row["version"]) for row in lock["package"] if row["name"] == "starlette"]
     assert versions and all(version >= floor for version in versions)
+
+
+CA_TRUST_PACKAGES = {"certifi"}
+
+
+def test_every_dependency_is_held_to_one_three_day_release_age():
+    """Hermes's deps must be >= 3 days old when locked, exact pins included (Teknium ruling).
+
+    A per-package exemption or date would quietly let a fresh release into the lock; the
+    check runs at lock time only, so users never need a mirror that serves upload times.
+    The sole exception is CA trust stores: a CA revocation must ship the day it is released.
+    """
+    manifest = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    uv = manifest["tool"]["uv"]
+    lock = tomllib.loads((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    assert uv["exclude-newer"] == "3 days"
+    exempt = uv.get("exclude-newer-package", {})
+    assert set(exempt) <= CA_TRUST_PACKAGES, exempt
+    assert all(value is False for value in exempt.values()), exempt
+    assert lock["options"].get("exclude-newer-span") == "P3D"
+    assert lock["options"].get("exclude-newer-package", {}) == exempt
+
+
+def test_httpx2_pins_and_lock_exclude_ghsa_7mj9_2mp8_4m2p_family():
+    # 2.12.0 is the first httpx2/httpcore2 release clear of GHSA-7mj9-2mp8-4m2p,
+    # GHSA-f2fp-rgf2-35cp, GHSA-h4x7-gw46-3wm6, GHSA-pf96-p4fj-6566 and
+    # GHSA-8xx6-hgc6-gc2m; the boundary is independent of today's exact pin.
+    floor = Version("2.12.0")
+    metadata = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    lock = tomllib.loads((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    declared = dict(metadata["project"]["optional-dependencies"])
+    declared["group:dev"] = metadata["dependency-groups"]["dev"]
+    found = set()
+    for where, specs in declared.items():
+        for requirement in map(Requirement, specs):
+            if requirement.name != "httpx2":
+                continue
+            pins = list(requirement.specifier)
+            assert len(pins) == 1 and pins[0].operator == "==", (where, requirement)
+            assert Version(pins[0].version) >= floor, (where, requirement)
+            found.add(where)
+    assert {"mcp", "computer-use", "group:dev"} <= found
+    for name in ("httpx2", "httpcore2"):
+        versions = [Version(row["version"]) for row in lock["package"] if row["name"] == name]
+        assert versions and all(version >= floor for version in versions), (name, versions)

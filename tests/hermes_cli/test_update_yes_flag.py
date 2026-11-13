@@ -23,13 +23,13 @@ def test_yes_auto_applies_config_migration_without_input(monkeypatch, capsys):
     from hermes_cli import config
 
     monkeypatch.setattr(config, "get_missing_env_vars", lambda **kw: ["NEW_KEY"])
-    monkeypatch.setattr(config, "get_missing_config_fields", lambda: [])
+    monkeypatch.setattr(config, "get_missing_config_fields", list)
     monkeypatch.setattr(config, "check_config_version", lambda **kw: (1, 2))
     calls = []
     monkeypatch.setattr(config, "migrate_config", lambda **kw: calls.append(kw) or {
         "env_added": [], "config_added": []
     })
-    monkeypatch.setattr(update_cmd, "_migrate_sibling_profile_configs", lambda: [])
+    monkeypatch.setattr(update_cmd, "_migrate_sibling_profile_configs", list)
     monkeypatch.setattr(update_cmd_config, "_restore_snapshot_safety_nets", lambda *_: None)
 
     with patch("builtins.input") as prompt:
@@ -61,14 +61,27 @@ def test_yes_restore_skips_confirmation_and_restores_real_stash(tmp_path, monkey
     git("init", "-q", "-b", "main")
     git("config", "user.email", "fixture@example.invalid")
     git("config", "user.name", "Fixture")
+    # Use the native bootstrap from this checkout, but keep runtime discovery
+    # and the imported health-check module inside the disposable repository.
+    from pathlib import Path
+    import hermes_bootstrap
+
+    monkeypatch.setenv("HERMES_RUNTIME_DIR", str(tmp_path / "runtime"))
+    (tmp_path / "hermes_bootstrap.py").symlink_to(Path(hermes_bootstrap.__file__))
+    probe = tmp_path / "restore_probe.py"
+    probe.write_text(
+        "from pathlib import Path\n"
+        "Path(__file__).with_suffix('.imported').write_text('imported')\n",
+        encoding="utf-8",
+    )
     source = tmp_path / "local.txt"
     source.write_text("original\n", encoding="utf-8")
-    git("add", "local.txt")
+    git("add", "local.txt", "hermes_bootstrap.py", "restore_probe.py")
     git("commit", "-qm", "base")
     source.write_text("local edit\n", encoding="utf-8")
     ref = update_cmd._stash_local_changes_if_needed(["git"], tmp_path)
     assert ref
-    monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ())
+    monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ("restore_probe",))
     with patch("builtins.input") as prompt:
         assert update_cmd._restore_stashed_changes(
             ["git"], tmp_path, ref, prompt_user=False
@@ -76,6 +89,7 @@ def test_yes_restore_skips_confirmation_and_restores_real_stash(tmp_path, monkey
     prompt.assert_not_called()
     assert source.read_text(encoding="utf-8") == "local edit\n"
     assert not git("stash", "list").stdout.strip()
+    assert probe.with_suffix(".imported").read_text(encoding="utf-8") == "imported"
 
 
 @pytest.mark.parametrize("error", [EOFError(), UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")])

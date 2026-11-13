@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -12,7 +12,7 @@ from hermes_cli.advisor_gate import MAX_PACKET_BYTES, build_decision_packet
 from hermes_cli.subcommands.advisor import build_advisor_parser
 
 
-STAMP = datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+STAMP = datetime(2026, 9, 8, 12, 0, tzinfo=UTC).isoformat().replace("+00:00", "Z")
 
 
 def _packet():

@@ -9,7 +9,7 @@ semantic ranking decisions.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 import json
 import math
 from pathlib import Path
@@ -26,7 +26,7 @@ VALUE_TYPES = frozenset({"string", "integer", "number", "boolean", "date", "date
 _MAX_IDENTIFIER_CHARS = 256
 _MAX_SOURCE_CHARS = 512
 _MAX_REASON_CHARS = 2_000
-_UTC = timezone.utc
+_UTC = UTC
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _SCHEMA = """
@@ -563,7 +563,7 @@ class ExactMemoryLedger:
             self._conn.close()
             self._closed = True
 
-    def __enter__(self) -> "ExactMemoryLedger":
+    def __enter__(self) -> ExactMemoryLedger:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -708,7 +708,10 @@ def _canonical_timestamp(value: str | date | datetime, field: str) -> str:
                 raise LedgerValidationError(f"{field} is not a valid date") from exc
         else:
             try:
-                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                # Do not broaden accepted persisted timestamps during lint modernization.
+                if "Z" in raw[:-1]:
+                    raise ValueError("embedded UTC designator")
+                parsed = datetime.fromisoformat(raw)
             except ValueError as exc:
                 raise LedgerValidationError(f"{field} is not a valid ISO timestamp") from exc
     else:
@@ -750,7 +753,7 @@ def _unique_value_facts(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "VALUE_TYPES",
     "ExactMemoryLedger",
     "LedgerValidationError",
-    "VALUE_TYPES",
 ]

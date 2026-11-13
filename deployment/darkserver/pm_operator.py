@@ -204,6 +204,20 @@ def _hash_file(path: Path) -> str:
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
+def _sync_venv_checked(root: Path, *, expected_facts_sha256: str, **options) -> str:
+    """Use the upstream PM sync API while retaining the operator's state checks."""
+    from pm import sync_venv
+    from pm.environments import runtime_facts_path
+
+    facts_path = runtime_facts_path(root).resolve()
+    before = facts_path.read_bytes()
+    if hashlib.sha256(before).hexdigest() != expected_facts_sha256:
+        raise RuntimeError("native PM facts changed before dependency sync")
+    sync_venv(project_root=root, **options)
+    after = facts_path.read_bytes()
+    return hashlib.sha256(after).hexdigest()
+
+
 def _tree_fingerprint(root: Path) -> dict:
     digest = hashlib.sha256()
     entries = 0
@@ -651,9 +665,9 @@ def _repair(root: Path) -> dict:
     original_facts_sha256 = hashlib.sha256(state["facts_bytes"]).hexdigest()
     committed_facts_sha256 = None
     try:
-        committed_facts_sha256 = sync_venv(
-            repair=True, explicit=True, project_root=root,
-            expected_facts_sha256=original_facts_sha256, return_facts_sha256=True,
+        committed_facts_sha256 = _sync_venv_checked(
+            root, repair=True, explicit=True,
+            expected_facts_sha256=original_facts_sha256,
         )
         if not isinstance(committed_facts_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", committed_facts_sha256):
             raise RuntimeError("native PM repair did not return its committed facts identity")
@@ -733,9 +747,9 @@ def _migrate(root: Path) -> dict:
     original_facts_sha256 = hashlib.sha256(state["facts_bytes"]).hexdigest()
     committed_facts_sha256 = None
     try:
-        committed_facts_sha256 = sync_venv(
-            extras=EXTRAS, explicit=True, plugins=Candidates([MEMBER]), project_root=root,
-            expected_facts_sha256=original_facts_sha256, return_facts_sha256=True,
+        committed_facts_sha256 = _sync_venv_checked(
+            root, extras=EXTRAS, explicit=True, plugins=Candidates([MEMBER]),
+            expected_facts_sha256=original_facts_sha256,
         )
         if not isinstance(committed_facts_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", committed_facts_sha256):
             raise RuntimeError("native PM migration did not return its committed facts identity")

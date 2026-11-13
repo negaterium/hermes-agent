@@ -8,7 +8,7 @@ import pm
 from scripts.bundles.payload import seal_pm_runtime
 root = Path('/app')
 from pm.store import current_target
-pm.prepare_tools(['python', 'uv', 'ffmpeg', 'node', 'npm', 'ripgrep'], out=root / 'tools', target=current_target(), cache=Path('/opt/hermes/build-cache'))
+pm.prepare_tools(['python', 'uv', 'ffmpeg', 'node', 'npm', 'ripgrep', 'chromium'], out=root / 'tools', target=current_target(), cache=Path('/opt/hermes/build-cache'))
 python = pm.installed_package('python').binary
 pm.stage_manager_runtime(python=python, destination=root / 'pm-runtime', project=root / 'pm', cache=Path('/opt/hermes/build-cache'))
 seal_pm_runtime(root, python)
