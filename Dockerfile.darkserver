@@ -11,12 +11,6 @@ RUN apt-get update && apt-get install -y \
     libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 \
     libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
     libvulkan-dev glslang-tools \
-    && mkdir -p /etc/apt/keyrings \
-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_26.x nodistro main" \
-        > /etc/apt/sources.list.d/nodesource.list \
-    && apt-get update && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # PostgreSQL client tools are runtime dependencies for the scheduled database
@@ -52,6 +46,7 @@ ENV GH_CONFIG_DIR="/root/.hermes/gh"
 # /root/.hermes volume overlay. darkserver-start.sh discovers the executable
 # at runtime and exports AGENT_BROWSER_EXECUTABLE_PATH for agent-browser.
 ENV PLAYWRIGHT_BROWSERS_PATH="/app/tools"
+ENV HERMES_RUNTIME_DIR="/app/tools"
 
 WORKDIR /app
 COPY . /app
@@ -63,12 +58,13 @@ RUN python3 -B /app/deployment/darkserver/context_identity.py /app /opt/hermes/b
 # GH_CONFIG_DIR above, while the binary/helper itself remains image-managed.
 RUN git config --system credential.https://github.com.helper '!/usr/bin/gh auth git-credential'
 
-# Install the locked Node workspaces. Chromium is not installed by npm:
-# upstream PM owns the checksummed browser artifact and records its runtime
-# facts below. Keeping those authorities separate avoids a Playwright revision
-# drift between package-lock.json and the browser used by Hermes.
-RUN npm ci --workspaces=false --no-audit --fetch-retries=5 \
-    && npm_config_ignore_scripts=true node /app/scripts/build/node-deps.mjs --source /app \
+# Install the locked Node workspaces with the source-pinned tools. The root
+# workspace intentionally refuses npm; node-deps verifies pnpm against
+# pm/lock.json and installs from pnpm-lock.yaml. Chromium is staged separately
+# by PM, so Playwright's lock metadata cannot drift from the runtime browser.
+RUN python3 -c 'from pathlib import Path; from pm import ensure, installed_package; [ensure(name, explicit=True) for name in ("node", "npm", "pnpm")]; [Path("/usr/local/bin", command).symlink_to(installed_package(package).binary) for command, package in (("node", "node"), ("npm", "npm"), ("pnpm", "pnpm"))]' \
+    && node --version && npm --version && pnpm --version \
+    && node /app/scripts/build/node-deps.mjs --source /app \
        --workspace web --workspace ui-tui --workspace ui-tui/packages/hermes-ink --workspace apps/shared \
     && npm cache clean --force
 
@@ -79,7 +75,7 @@ RUN npm install -g @tobilu/qmd@2.8.3 \
 # Build a fresh single dependency union through native PM, not raw pip/uv.
 ARG HERMES_BUILD_COMMIT=""
 ARG HERMES_CONTEXT_SHA256=""
-ENV HERMES_RUNTIME_DIR=/app/tools CC=gcc CXX=g++
+ENV CC=gcc CXX=g++
 RUN touch /app/README.md \
     && python3 -c 'import pm; pm.ensure("uv", explicit=True)' \
     && HERMES_BUILD_COMMIT="$HERMES_BUILD_COMMIT" HERMES_CONTEXT_SHA256="$HERMES_CONTEXT_SHA256" \
