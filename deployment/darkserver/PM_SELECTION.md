@@ -4,7 +4,7 @@ This is an explicit operator path, not an image-startup hook. It does not run du
 
 ## What is selected
 
-`integration-member/pyproject.toml` is the native PM member for the deployment-only Hindsight, Google, and Garmin dependencies. `integrations.txt` remains a readable pin ledger; the image builder refuses to proceed unless it exactly matches the member declaration. The candidate input uses native `Candidates`, so `pm.sync_venv` discovers enabled Python members across live Hermes homes and adds this deployment member instead of replacing profile selections.
+`integration-member/pyproject.toml` is the native PM member for deployment-only Hindsight, Google, and Garmin dependencies, plus the retained `tenacity` compatibility pin required by DarkServer's mounted `/app/code` regression inventory. Upstream removed Tenacity from core because no current Hermes module imports it. `integrations.txt` remains a readable pin ledger; the image builder refuses to proceed unless it exactly matches the member declaration. The candidate input uses native `Candidates`, so `pm.sync_venv` discovers enabled Python members across live Hermes homes and adds this deployment member instead of replacing profile selections.
 
 The operator puts `/app` first on its import path deliberately: `/app/code` is the mounted checkout, while `/app` is the install/project root whose PM facts this migration owns. It calls the supported native `pm.sync_venv` API with `all`, `telegram`, `matrix`, `audio-io`, and `edge-tts`; no raw pip/uv mutation or facts fabrication is used. The image's node, npm, uv, and Chromium paths are pinned by the current `pm/lock.json` and prepared through native PM.
 

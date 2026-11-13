@@ -10,6 +10,7 @@ dependencies = [
   "garminconnect==0.3.16",
   "importlib-metadata==8.7.1",
   "pytz==2026.3.post1",
+  "tenacity==9.2.1",
   "zipp==4.1.0",
 ]
 
