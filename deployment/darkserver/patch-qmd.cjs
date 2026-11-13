@@ -2,7 +2,9 @@
 const fs = require('fs');
 const path = require('path');
 const cp = require('child_process');
-const root = cp.execFileSync('npm', ['root', '-g'], { encoding: 'utf8' }).trim();
+const root = cp.execFileSync(
+  'npm', ['root', '-g', '--prefix', '/opt/hermes-qmd'], { encoding: 'utf8' }
+).trim();
 const pkg = path.join(root, '@tobilu/qmd');
 if (JSON.parse(fs.readFileSync(path.join(pkg, 'package.json'), 'utf8')).version !== '2.8.3') {
   throw new Error('QMD patch requires reviewed version 2.8.3');
