@@ -64,7 +64,7 @@ def append_log(text: str) -> None:
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", check=False)
 
 
 def summarize(output: str) -> str:

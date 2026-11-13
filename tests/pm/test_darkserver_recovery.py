@@ -50,7 +50,7 @@ def broken_selection(tmp_path, monkeypatch, request):
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_RUNTIME_DIR", str(home / "runtime"))
     monkeypatch.setattr(paths, "repo_root", lambda: core)
-    monkeypatch.setattr(workspace, "enabled_member_dirs", lambda: [])
+    monkeypatch.setattr(workspace, "enabled_member_dirs", list)
     engine = importlib.import_module("pm.install")
     uv = shutil.which("uv")
     assert uv, "requires the provisioned native uv"
@@ -115,7 +115,7 @@ def test_operator_adapter_refuses_stale_facts_before_native_sync(broken_selectio
 def test_operator_adapter_returns_committed_facts_hash(broken_selection, monkeypatch):
     import pm
 
-    operator, core, _old, facts_path, original, _fact, _lock, _verify, calls = broken_selection
+    operator, core, _old, facts_path, original, _fact, _lock, _verify, _calls = broken_selection
     committed = json.dumps({"selection": "committed"}, separators=(",", ":")).encode()
 
     def native_sync(*_args, project_root=None, **_kwargs):
@@ -274,7 +274,7 @@ def test_repair_evidence_refuses_symlinked_deployment_before_writing_outside(
 
 
 def test_repair_failure_preserves_a_concurrent_native_selection(broken_selection, monkeypatch):
-    operator, core, _old, facts_path, original, _fact, _lock, _verify, _calls = broken_selection
+    operator, core, _old, facts_path, _original, _fact, _lock, _verify, _calls = broken_selection
     image_store = core / "tools"
     image_python = stage_host_python(image_store / "python-3.14.9" / "bin" / "python3")
     uv = shutil.which("uv")
